@@ -1,0 +1,34 @@
+## Task: Mutation - Explore New Variations
+
+{user_generator}
+
+### [Accumulated Design Insights]
+{reflection}
+
+### [Current Best Code (Elitist)]
+{func_signature1}
+{elitist_code}
+
+---
+
+**Your Task:**
+Create a mutated `{func_name}_v2` function that explores new algorithmic variations.
+
+**Mutation Strategy:**
+1. Start from the current best code as a foundation
+2. Apply insights from accumulated design knowledge
+3. Introduce creative variations (e.g., different weighting, new terms, alternative logic)
+4. Balance exploration (novelty) with exploitation (proven strategies)
+
+**Requirements:**
+- Mutate the discrete structure, not only continuous constants. Keep complexity
+  bounded and expose every tunable value through PARAMETER_SCHEMA and PARAMS.
+- Apply only repeated decision/seed/scenario counterfactual evidence, preserve
+  DDL priority and diagnostic conflicts, and let the subsequent CMA-ES run
+  choose every continuous value.
+- Output ONLY Python code in a code block: ```python ... ```
+- Follow the function signature format
+- Ensure code is syntactically correct
+- Include brief inline comments for new/modified logic
+
+**Generate the mutated code below:**

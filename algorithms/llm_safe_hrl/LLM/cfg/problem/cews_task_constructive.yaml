@@ -1,0 +1,86 @@
+# -----------------------------------------------------------------------------
+# 云边工作流“任务优先级规则”构造问题
+# -----------------------------------------------------------------------------
+# 一个 SeEvo 个体只包含 get_task_priority_v* 的 Python 代码字符串。
+# LLM 只对当前 ready tasks 打分；任务选定后的 VM 可行性判断和资源选择
+# 由环境中的固定确定性策略完成，因此这里仍属于 constructive 问题，
+# 而不是强化学习策略训练问题。
+problem_name: cews_task_constructive
+# constructive 表示规则会在调度过程中反复参与构造完整解。
+problem_type: constructive
+# 目标函数越小越好；SeEvo 内部按照该字段决定是否需要对目标值取负。
+obj_type: min
+# 默认每个评价实例包含的工作流数量，同时作为缺省规模参数使用。
+problem_size: 50
+# SeEvo 用它定位 seed 函数，并把完整函数名从 v1 精确替换为 v2。
+func_name: get_task_priority
+
+description: >
+  Dynamic deadline-aware cloud-edge workflow scheduling. Workflows are
+  represented as DAGs. At each decision point, the heuristic ranks all
+  currently ready tasks. After one task is selected, a deterministic
+  resource-selection policy assigns it to a feasible cloud or edge VM. The
+  objective is to minimize risk-adjusted fuzzy total energy subject to hard
+  workflow deadline constraints.
+
+objective:
+  metric: total_energy
+
+constraints:
+  deadline_violation_rate_max: 0.0
+  comparison: feasibility_first
+
+# 三点影子场景的风险调整能耗评价。关闭 enabled 时完整回退到历史 modal 目标、
+# modal 截止期与旧 VM 排序；资源 modal 值和 LLM 八参数接口在两种模式下均不变。
+fuzzy:
+  enabled: true
+  delta1: 0.75
+  delta2: 1.2
+  energy_uncertainty_weight: 1.0
+  deadline_eta: 0.95
+  use_fuzzy_deadline_constraint: true
+  # episode_seed 表示相同评价 seed 的所有候选复用同一组三角模糊资源边界。
+  resource_seed_mode: episode_seed
+  resource_seed_offset: 0
+
+# 复用原云边环境已有的归一化口径，避免为了新问题另造尺度：
+# energy_reward_scale=1e-3，task_baseline_norm=300 秒。
+normalization:
+  # normalized_energy = total_energy * energy_scale。
+  energy_scale: 0.001
+  # normalized_lateness = average_lateness / lateness_scale。
+  lateness_scale: 300.0
+
+dataset:
+  # 两个字符依次表示任务规模和资源规模：S/M/L -> small/med/large。
+  scenario: SS
+  # 未传 case_num/--cases 时，训练和测试分别使用以下随机种子。
+  train_seeds: [1, 2, 3]
+  # Held-out seeds used by CMA-ES confirm; disjoint from train and final test.
+  validation_seeds: [4, 5]
+  test_seeds: [201, 202, 203, 204, 205, 206, 207, 208, 209, 210, 211, 212, 213, 214, 215, 216, 217, 218, 219, 220, 221, 222, 223, 224, 225, 226, 227, 228, 229, 230]
+  # 复用项目 data/dax 下的真实工作流 DAG；每次到达时从中抽取模板。
+  dax_files:
+    - CyberShake_30.xml
+    - Epigenomics_24.xml
+    - Ligo_30.xml
+    - Montage_25.xml
+    - Sipht_29.xml
+  # 每个随机种子下需要完成的工作流总数。
+  workflows_per_instance: 50
+  # 工作流到达过程的泊松率参数，沿用现有环境语义。
+  arrival_lambda: 0.03
+  # 仿真时间上界；正常情况下所有工作流会在此之前完成。
+  horizon: 1000000000.0
+  # 从现有 FCFS deadline cache 读取工作流截止期。
+  deadline_mode: cache_fcfs
+  # 缓存缺失或生成截止期时沿用的大小工作流 deadline 系数。
+  deadline_alpha_small: 2.0
+  deadline_alpha_large: 3.0
+  deadline_alpha_small_prob: 0.8
+
+safety:
+  # 防止错误候选或环境异常使单次评价无限运行。
+  # max_decisions 限制任务分配次数；max_stalled_steps 限制连续无状态进展次数。
+  max_decisions: 1000000
+  max_stalled_steps: 10

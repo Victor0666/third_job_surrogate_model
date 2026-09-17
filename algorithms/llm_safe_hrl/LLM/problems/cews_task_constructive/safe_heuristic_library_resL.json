@@ -1,0 +1,32 @@
+{
+  "schema_version": 3,
+  "manifest_id": "cews_safe_manager_heuristics_resL",
+  "manifest_version": "2026-07-31.resource-domain.v1",
+  "manifest_revision": 0,
+  "trusted_source_root": "generated",
+  "trusted_report_root": "admission_reports",
+  "admission_scope": {
+    "mode": "resource_task_domain",
+    "resource_code": "L",
+    "allowed_scenarios": ["SL", "ML", "LL"],
+    "workflow_families": [
+      "CyberShake",
+      "Epigenomics",
+      "Ligo",
+      "Montage",
+      "Sipht"
+    ]
+  },
+  "admission_policy": {
+    "policy_version": "hrl_resL_50wf_3seed_v2",
+    "required_evaluation_seeds": [0, 1, 2],
+    "minimum_evaluation_seed_count": 3,
+    "deadline_violation_rate_max": 0.0,
+    "max_fuzzy_lateness_max": 0.0,
+    "feasible_seed_rate_min": 1.0,
+    "fuzzy_energy_score_max": 330000.0,
+    "objective_cv_max": 0.05
+  },
+  "evidence_scope_note": "Schema-v3 resource-domain library. Evaluation seeds are offline admission evidence and never restrict runtime seeds. No schema-v2 record is migrated implicitly.",
+  "llm_rules": []
+}

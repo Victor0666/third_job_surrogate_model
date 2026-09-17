@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+
+# IDE
+.idea/
+.vscode/
+
+# Environment / credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Runtime outputs
+out/
+outputs/
+checkpoints/
+algorithms/llm_safe_hrl/LLM/outputs/
+algorithms/llm_safe_hrl/LLM/problems/cews_task_constructive/generated/
+
+# Model / temporary artifacts
+*.pt
+*.pth
+*.log
+*.tmp
+
+# Surrogate runtime artifacts
+**/parameter_evaluation_cache.json
+**/surrogate/exact_labels.jsonl
+**/surrogate/model_checkpoint.pkl
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Recovery files
+.recovery_backup/
+.recovery_hrl_edits.json
+
+# Test runtime artifacts
+tests/artifacts/

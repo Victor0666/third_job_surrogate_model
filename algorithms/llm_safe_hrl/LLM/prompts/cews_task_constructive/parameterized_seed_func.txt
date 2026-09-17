@@ -1,0 +1,114 @@
+```python
+import numpy as np
+
+
+PARAMETER_SCHEMA = {
+    "schema_version": 1,
+    "parameters": [
+        {
+            "name": "epsilon",
+            "initial_value": 0.001,
+            "lower_bound": 0.000001,
+            "upper_bound": 0.1,
+            "semantic_description": "Positive numerical scale guard used by normalization.",
+            "parameter_type": "float",
+            "transform": "log"
+        },
+        {
+            "name": "slack_weight",
+            "initial_value": 3.0,
+            "lower_bound": 0.1,
+            "upper_bound": 8.0,
+            "semantic_description": "Priority strength assigned to deadline slack.",
+            "parameter_type": "float",
+            "transform": "identity"
+        },
+        {
+            "name": "energy_weight",
+            "initial_value": 1.0,
+            "lower_bound": 0.01,
+            "upper_bound": 4.0,
+            "semantic_description": "Secondary weight for risk-adjusted marginal fuzzy energy.",
+            "parameter_type": "float",
+            "transform": "identity"
+        },
+        {
+            "name": "duration_weight",
+            "initial_value": 0.5,
+            "lower_bound": 0.0,
+            "upper_bound": 3.0,
+            "semantic_description": "Weight for normalized execution and communication duration.",
+            "parameter_type": "float",
+            "transform": "identity"
+        },
+        {
+            "name": "rank_weight",
+            "initial_value": 0.8,
+            "lower_bound": 0.0,
+            "upper_bound": 4.0,
+            "semantic_description": "Priority strength assigned to HEFT upward rank.",
+            "parameter_type": "float",
+            "transform": "identity"
+        },
+        {
+            "name": "work_weight",
+            "initial_value": 0.3,
+            "lower_bound": 0.0,
+            "upper_bound": 2.0,
+            "semantic_description": "Priority strength assigned to remaining workflow work.",
+            "parameter_type": "float",
+            "transform": "identity"
+        },
+        {
+            "name": "wait_weight",
+            "initial_value": 0.2,
+            "lower_bound": 0.0,
+            "upper_bound": 2.0,
+            "semantic_description": "Anti-starvation priority strength for ready waiting time.",
+            "parameter_type": "float",
+            "transform": "identity"
+        },
+        {
+            "name": "uncertainty_weight",
+            "initial_value": 0.4,
+            "lower_bound": 0.0,
+            "upper_bound": 3.0,
+            "semantic_description": "Strength of the uncertainty and deadline-pressure interaction.",
+            "parameter_type": "float",
+            "transform": "identity"
+        }
+    ]
+}
+
+
+def get_task_priority_v2(
+    min_exec_time,
+    min_comm_time,
+    min_incremental_energy,
+    slack,
+    upward_rank,
+    remaining_work,
+    ready_wait_time,
+    uncertainty
+):
+    """Parameterized structural example; smaller scores have higher priority."""
+    epsilon = PARAMS["epsilon"]
+
+    def normalize(values):
+        values = np.asarray(values, dtype=float)
+        return values / (np.mean(np.abs(values)) + epsilon)
+
+    duration = normalize(min_exec_time + min_comm_time)
+    slack_pressure = normalize(slack)
+    uncertainty_gate = normalize(uncertainty) * np.maximum(-slack_pressure, 0)
+    score = (
+        PARAMS["slack_weight"] * slack_pressure
+        + PARAMS["energy_weight"] * normalize(min_incremental_energy)
+        + PARAMS["duration_weight"] * duration
+        - PARAMS["rank_weight"] * normalize(upward_rank)
+        - PARAMS["work_weight"] * normalize(remaining_work)
+        - PARAMS["wait_weight"] * normalize(ready_wait_time)
+        - PARAMS["uncertainty_weight"] * uncertainty_gate
+    )
+    return np.nan_to_num(score)
+```

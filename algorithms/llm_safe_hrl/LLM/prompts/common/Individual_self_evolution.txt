@@ -1,0 +1,38 @@
+## Task: Individual Self-Evolution
+
+{user_generator}
+
+### [Previous Version (Baseline)]
+{func_signature0}
+{older_code}
+
+### [Current Version (Recently Generated)]
+{func_signature1}
+{new_code}
+
+### [Self-Reflection on Recent Evolution]
+{reflection}
+
+---
+
+**Your Task:**
+Generate an improved `{func_name}_v2` function through self-evolution.
+
+**Self-Evolution Strategy:**
+1. Analyze the evolution from previous to current version
+2. Understand what worked and what didn't based on reflection
+3. Build upon successful changes
+4. Address identified weaknesses
+5. Push the design further with additional improvements
+
+**Requirements:**
+- Prioritize one bounded structural change to features, interactions,
+  normalization, gates, or nonlinear/piecewise form. Do not submit a
+  numeric-only revision as a new structure.
+- Keep a literal PARAMETER_SCHEMA and PARAMS["name"] references for CMA-ES.
+- Output ONLY Python code in a code block: ```python ... ```
+- Follow the function signature format
+- Ensure code is syntactically correct
+- Include brief inline comments for key improvements
+
+**Generate the self-evolved code below:**

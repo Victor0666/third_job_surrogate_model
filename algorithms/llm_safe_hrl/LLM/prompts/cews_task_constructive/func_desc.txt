@@ -1,0 +1,103 @@
+Design a deterministic NumPy function that assigns one priority score to each
+currently ready workflow task.
+
+请设计一个确定性的 NumPy 函数，为当前每个就绪工作流任务计算一个优先级分数。
+该函数是“任务排序器”，不是资源分配器；环境只会选择分数最小的任务。
+
+Interface contract:
+
+接口契约（以下要求必须同时满足）：
+
+1. The function only ranks ready tasks. It must not select a Host or VM.
+2. Every input is a one-dimensional NumPy array of length N, where N is the
+   number of currently ready tasks. Equal indices always describe the same task.
+3. Return a one-dimensional finite numeric array with shape (N,).
+4. A smaller score means higher scheduling priority.
+5. Do not perform file operations, network access, subprocess creation, or
+   modification of global state.
+6. Do not use unbounded or infinite loops.
+7. Protect divisions and all other operations against zero, NaN, and infinity.
+8. NumPy and ordinary Python standard operations may be used.
+9. The environment enforces resource and precedence feasibility. The function
+   must not create, remove, or mutate tasks.
+10. Do not modify any input array in place.
+11. A single ready task must still produce an array with shape (1,).
+12. The returned values must be deterministic for identical inputs.
+
+中文说明：
+
+1. 函数只对 ready tasks 排序，绝不能选择 Host 或 VM。
+2. 所有输入都是长度为 N 的一维 NumPy 数组，数组同一下标描述同一任务。
+3. 返回值必须是形状严格等于 (N,) 的有限数值数组，不能返回标量或二维列向量。
+4. 分数越小表示越优先；环境使用 np.argmin 选择任务。
+5. 禁止文件、网络、子进程操作，也禁止修改全局状态。
+6. 禁止无界循环或任何可能无限执行的逻辑。
+7. 除法及其他数值运算必须防止除零、NaN 和正负无穷。
+8. 可使用 NumPy 和普通 Python 标准运算。
+9. 前驱约束和 VM 可行性由环境负责，函数不得创建、删除或修改任务。
+10. 禁止原地修改任一输入数组；如需转换类型，应创建新的数组视图或副本。
+11. N=1 时也必须返回形状为 (1,) 的数组。
+12. 相同输入必须产生相同输出，不能依赖随机数、时间或隐藏状态。
+
+Inputs:
+
+输入含义与单位：
+
+- `min_exec_time`: minimum estimated execution time over feasible VMs, seconds.
+- `min_comm_time`: minimum estimated task-data communication time over feasible
+  VMs, seconds.
+- `min_incremental_energy`: minimum risk-adjusted fuzzy marginal energy score
+  over feasible VMs, computed as fuzzy mean plus uncertainty weight times fuzzy
+  standard deviation; its scale remains joules.
+- `slack`: task sub-deadline (or workflow deadline) minus its earliest predicted
+  risk completion time. In fuzzy mode the risk time uses eta=0.95 by default.
+  Negative values indicate lateness risk.
+- `upward_rank`: HEFT upward rank / remaining critical-path importance.
+- `remaining_work`: estimated computation work from this task through all of its
+  descendants.
+- `ready_wait_time`: elapsed time since the task entered the ready set, seconds.
+- `uncertainty`: execution/bandwidth uncertainty risk aggregated consistently
+  over feasible VMs.
+
+逐项中文解释：
+
+- `min_exec_time`：该任务在所有可行 VM 上的最小预计纯计算时间，单位秒；
+  不包含排队与通信。
+- `min_comm_time`：该任务在所有可行 VM 上的最小预计输入/输出通信时间，单位秒。
+- `min_incremental_energy`：该任务加入某个可行 VM 后，三场景边际 Host 能耗
+  ``mean + uncertainty_weight * std`` 在所有可行 VM 中的最小值；量纲仍可解释为
+  风险调整后的焦耳，不是整个 episode 的累计能耗。
+- `slack`：任务子截止期（缺失时为工作流截止期）减去当前最早风险完成时刻。
+  fuzzy 模式默认使用 eta=0.95 的上侧概率测度；单位秒，负值表示延期风险。
+- `upward_rank`：HEFT upward rank，反映从当前节点到出口节点的关键路径重要性。
+- `remaining_work`：当前任务及其全部后继任务的去重计算工作量，单位 MI。
+- `ready_wait_time`：从任务首次进入 ready 集到当前仿真时刻的等待时间，单位秒。
+- `uncertainty`：可行 VM 上模糊计算与通信总时长标准差的统一聚合风险量。
+
+The function must contain only the task-priority rule. VM feasibility, VM
+selection, assignment, and event advancement are handled by the evaluator.
+
+Parameterized structure contract for offline co-evolution:
+- The LLM designs feature selection, normalization, interactions, nonlinear or
+  piecewise forms, and bounded conditional gates.
+- Put one literal `PARAMETER_SCHEMA` mapping in the same Python code block. It
+  must contain `schema_version` and a `parameters` list. Every parameter item
+  must define `name`, `initial_value`, `lower_bound`, `upper_bound`, and
+  `semantic_description`; optional `parameter_type` is `float` and optional
+  `transform` is `identity`, `log`, or `logit`.
+- Reference every continuous parameter only as `PARAMS["declared_name"]` inside
+  `get_task_priority_v2`. Do not define PARAMS and do not hide tunable numeric
+  constants. Structural constants are limited to -2, -1, 0, 1, and 2.
+- Keep 5-12 parameters, at most 6 conditional branches, bounded AST depth, and
+  at most 8 feature interaction terms. Loops, recursion, external I/O, random
+  state, and Host/VM selection are forbidden.
+- CMA-ES optimizes only the declared continuous parameters offline. The final
+  admitted rule has those values frozen into an ordinary deterministic
+  `get_task_priority_v2` with the unchanged eight-array signature.
+
+函数体只能包含任务优先级计算。VM 可行性检查、确定性 VM 选择、任务分配和
+离散事件推进均由评价器及环境处理。不要在规则内部猜测或构造 VM 编号。
+优化问题采用“DDL 硬约束下最小化风险调整模糊总能耗”。最终能耗目标为三个
+固定影子场景总能耗构造出的 ``mean(fuzzy energy) + uncertainty_weight *
+std(fuzzy energy)``。DDL 延期和违反率始终是独立约束，绝不能与能耗加权求和。
+规则应优先帮助调度满足模糊截止期约束；在可行个体之间降低模糊能耗目标。

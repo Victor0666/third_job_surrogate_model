@@ -1,0 +1,15 @@
+import numpy as np
+
+# 函数名中的 {version} 由 SeEvo 在生成 Prompt 时替换为目标版本号。
+# 八个输入均为长度 N 的一维数组；相同下标始终指向同一个 ready task。
+# 返回值也必须是长度 N 的一维数组，并遵守“分数越小，优先级越高”。
+def get_task_priority_v{version}(
+    min_exec_time,
+    min_comm_time,
+    min_incremental_energy,
+    slack,
+    upward_rank,
+    remaining_work,
+    ready_wait_time,
+    uncertainty
+):

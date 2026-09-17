@@ -1,0 +1,10 @@
+Write a {func_name} function for {problem_desc}
+{func_desc}
+
+For a parameterized problem, output the literal PARAMETER_SCHEMA assignment and
+the function together in one Python code block. Design the discrete rule
+structure; expose all tunable continuous values through declared PARAMS entries.
+Before answering, verify that every PARAMS reference is declared exactly once,
+every declared parameter is used, and get_task_priority_v2 contains no numeric
+literals other than -2, -1, 0, 1, and 2. Use np.finfo for immutable machine
+precision safeguards instead of a literal epsilon.

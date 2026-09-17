@@ -1,0 +1,47 @@
+## Task: Analyze Performance Difference
+
+You are comparing two {func_name} functions for {problem_desc}
+
+**Problem Description:**
+{func_desc}
+
+**Performance Comparison:**
+- Code Version 1 (Lower Performance): See below
+- Code Version 2 (Higher Performance): See below
+
+### [Code Version 1 - Lower Performance]
+```python
+{worse_code}
+```
+
+### [Code Version 2 - Higher Performance]
+```python
+{better_code}
+```
+
+---
+
+**Your Task:**
+Analyze why Code Version 2 performs better and provide actionable insights for future improvements.
+
+**Requirements:**
+- Distinguish parameter-only evidence from a true structural change.
+- Recommend at least one bounded feature, interaction, normalization, gate, or
+  nonlinear/piecewise structural action when the evidence is repeated.
+- Correlation is not causation; strong changes require cross-generation,
+  cross-seed, or cross-scenario support and must be re-evaluated.
+- Use `cross_generation_evidence.stable_signals` as the only basis for claims
+  such as repeated boundary contact across generations.
+- Jointly use parameter diagnostics and compact counterfactual mechanism
+  feedback. The latter is local evidence, not strict causal proof; require
+  repeated decision/seed/scenario support for a strong structural change.
+- Do not edit final weights. Translate evidence into a bounded feature,
+  interaction, normalization, gate, nonlinear/piecewise, or smooth-risk change
+  that will be re-optimized by CMA-ES.
+- Identify key algorithmic differences
+- Explain why these differences lead to better performance
+- Suggest design principles to apply going forward
+- Keep your response concise (under 50 words)
+
+**Output Format:**
+Provide 2-3 concrete insights, each on a new line starting with "-"

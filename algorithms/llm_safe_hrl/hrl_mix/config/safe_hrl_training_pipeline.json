@@ -1,0 +1,255 @@
+{
+  "schema_version": 1,
+  "pipeline_id": "safe_hrl_five_stage_v1",
+  "checkpoint_interval_episodes": 25,
+  "metrics_path": "../../../../out/logs/safe_hrl_pipeline/stage_metrics.jsonl",
+  "seed_split": {
+    "training": [
+      1,
+      2,
+      3,
+      4,
+      5
+    ],
+    "validation": [
+      101,
+      102,
+      103
+    ],
+    "final_test": [
+      201,
+      202,
+      203,
+      204,
+      205,
+      206,
+      207,
+      208,
+      209,
+      210,
+      211,
+      212,
+      213,
+      214,
+      215,
+      216,
+      217,
+      218,
+      219,
+      220,
+      221,
+      222,
+      223,
+      224,
+      225,
+      226,
+      227,
+      228,
+      229,
+      230
+    ]
+  },
+  "preparation_stages": [
+    {
+      "stage_id": "stage_1_safe_demonstration_generation",
+      "stage_type": "demonstration_generation",
+      "execution": "external",
+      "artifact_manifest_path": "../../../../out/safe_demonstrations/manifest.json",
+      "require_completed_artifact": true
+    },
+    {
+      "stage_id": "stage_2_offline_pretraining",
+      "stage_type": "offline_pretraining",
+      "offline_pretraining": {
+        "dataset_manifest_path": "../../../../out/safe_demonstrations/manifest.json",
+        "epochs": 5,
+        "batch_size": 128,
+        "performance_learning_rate": 0.0001,
+        "safety_learning_rate": 0.0001,
+        "train_q_r": true,
+        "train_q_c": true,
+        "behavior_cloning_enabled": false,
+        "behavior_cloning_weight": 0.1,
+        "sync_targets_after_pretraining": true,
+        "random_seed": 17
+      }
+    }
+  ],
+  "online_stages": [
+    {
+      "stage_id": "stage_3_shield_online",
+      "stage_type": "shield_online_training",
+      "training_seed_mode": "primary",
+      "curriculum": {
+        "deadline": {
+          "level": "loose",
+          "alpha_small": 3.0,
+          "alpha_large": 4.0,
+          "alpha_small_probability": 0.8
+        },
+        "arrival": {
+          "level": "low",
+          "poisson_lambda": 0.01
+        },
+        "uncertainty": {
+          "level": "low",
+          "fuzzy_delta1": 0.9,
+          "fuzzy_delta2": 1.1
+        },
+        "resource": {
+          "scale": "small_capacity",
+          "capacity_scale": 1.0,
+          "topology": "inherit"
+        },
+        "workflow": {
+          "scale": "small",
+          "workflows_per_episode": 20
+        }
+      },
+      "transition": {
+        "mode": "fixed_episodes",
+        "episodes": 50
+      }
+    },
+    {
+      "stage_id": "stage_4_curriculum_loose",
+      "stage_type": "curriculum_training",
+      "training_seed_mode": "primary",
+      "curriculum": {
+        "deadline": {
+          "level": "loose",
+          "alpha_small": 3.0,
+          "alpha_large": 4.0,
+          "alpha_small_probability": 0.8
+        },
+        "arrival": {
+          "level": "low",
+          "poisson_lambda": 0.01
+        },
+        "uncertainty": {
+          "level": "low",
+          "fuzzy_delta1": 0.9,
+          "fuzzy_delta2": 1.1
+        },
+        "resource": {
+          "scale": "medium_capacity",
+          "capacity_scale": 1.0,
+          "topology": "inherit"
+        },
+        "workflow": {
+          "scale": "small",
+          "workflows_per_episode": 30
+        }
+      },
+      "transition": {
+        "mode": "fixed_episodes",
+        "episodes": 100
+      }
+    },
+    {
+      "stage_id": "stage_4_curriculum_medium",
+      "stage_type": "curriculum_training",
+      "training_seed_mode": "round_robin",
+      "curriculum": {
+        "deadline": {
+          "level": "medium",
+          "alpha_small": 2.5,
+          "alpha_large": 3.5,
+          "alpha_small_probability": 0.8
+        },
+        "arrival": {
+          "level": "medium",
+          "poisson_lambda": 0.03
+        },
+        "uncertainty": {
+          "level": "medium",
+          "fuzzy_delta1": 0.8,
+          "fuzzy_delta2": 1.15
+        },
+        "resource": {
+          "scale": "medium_capacity",
+          "capacity_scale": 0.9,
+          "topology": "inherit"
+        },
+        "workflow": {
+          "scale": "medium",
+          "workflows_per_episode": 40
+        }
+      },
+      "transition": {
+        "mode": "fixed_episodes",
+        "episodes": 150
+      }
+    },
+    {
+      "stage_id": "stage_4_curriculum_tight",
+      "stage_type": "curriculum_training",
+      "training_seed_mode": "round_robin",
+      "curriculum": {
+        "deadline": {
+          "level": "tight",
+          "alpha_small": 2.0,
+          "alpha_large": 3.0,
+          "alpha_small_probability": 0.8
+        },
+        "arrival": {
+          "level": "high",
+          "poisson_lambda": 0.05
+        },
+        "uncertainty": {
+          "level": "high",
+          "fuzzy_delta1": 0.75,
+          "fuzzy_delta2": 1.2
+        },
+        "resource": {
+          "scale": "large_workload_capacity",
+          "capacity_scale": 0.8,
+          "topology": "inherit"
+        },
+        "workflow": {
+          "scale": "large",
+          "workflows_per_episode": 50
+        }
+      },
+      "transition": {
+        "mode": "fixed_episodes",
+        "episodes": 200
+      }
+    },
+    {
+      "stage_id": "stage_5_cross_seed_robust",
+      "stage_type": "cross_seed_robust_training",
+      "training_seed_mode": "round_robin",
+      "curriculum": {
+        "deadline": {
+          "level": "tight",
+          "alpha_small": 2.0,
+          "alpha_large": 3.0,
+          "alpha_small_probability": 0.8
+        },
+        "arrival": {
+          "level": "high",
+          "poisson_lambda": 0.05
+        },
+        "uncertainty": {
+          "level": "high",
+          "fuzzy_delta1": 0.75,
+          "fuzzy_delta2": 1.2
+        },
+        "resource": {
+          "scale": "large_workload_capacity",
+          "capacity_scale": 0.8,
+          "topology": "inherit"
+        },
+        "workflow": {
+          "scale": "large",
+          "workflows_per_episode": 50
+        }
+      },
+      "transition": {
+        "mode": "fixed_episodes",
+        "episodes": 100
+      }
+    }
+  ]
+}

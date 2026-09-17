@@ -1,0 +1,41 @@
+## Task: Crossover - Generate Improved Heuristic
+
+{user_generator}
+
+### [Parent 1 - Lower Performance]
+{func_signature0}
+{worse_code}
+
+### [Parent 2 - Higher Performance]
+{func_signature1}
+{better_code}
+
+### [Performance Analysis]
+{reflection}
+
+---
+
+**Your Task:**
+Generate an improved `{func_name}_v2` function by combining strengths from both parents.
+
+**Strategy:**
+1. Preserve successful elements from Parent 2 (higher performance)
+2. Consider any useful components from Parent 1
+3. Apply insights from the performance analysis
+4. Introduce novel improvements where possible
+
+**Requirements:**
+- Produce a discrete parameterized structure with a literal PARAMETER_SCHEMA
+  and PARAMS["name"] references. Let CMA-ES choose continuous values.
+- Make at least one justified structural change; changing only numeric values
+  does not create a new structure.
+- Use repeated counterfactual patterns to change features, interactions,
+  normalization, gates, or nonlinear/piecewise forms. Treat isolated local
+  comparisons as non-causal and keep complexity bounded. The result will run
+  through CMA-ES again.
+- Output ONLY Python code in a code block: ```python ... ```
+- Follow the function signature format
+- Ensure code is syntactically correct
+- Include brief inline comments explaining key logic
+
+**Generate the improved code below:**

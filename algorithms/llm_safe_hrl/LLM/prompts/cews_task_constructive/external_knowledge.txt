@@ -1,0 +1,67 @@
+- Give stronger priority to tasks with small or negative deadline slack; negative
+  slack should receive a substantial risk penalty.
+- Use HEFT upward rank to identify tasks on important remaining DAG paths.
+- Consider computation time, communication time, and incremental energy together.
+- Include ready-set waiting time so that long-waiting tasks do not starve.
+- Under uncertain processing capacity and bandwidth, use the provided
+  risk-adjusted fuzzy marginal-energy, slack, and duration-uncertainty signals.
+- Do not directly add seconds, joules, and dimensionless features. Normalize or
+  otherwise make their scales comparable first.
+- Do not unconditionally favor only short tasks or only critical tasks.
+- Avoid unstable exponentials, logarithms near invalid domains, and overly
+  complicated trigonometric combinations.
+
+中文调度知识：
+
+- 优化目标是满足全部工作流 DDL 约束后的总能耗最小化。延期量和违反率用于
+  判断可行性及引导不可行个体改进，不与焦耳能耗组成加权目标。
+
+- 当前总能耗由 optimistic/modal/pessimistic 三个固定影子场景的 SPECpower
+  积分构成三角模糊数，评价目标是其均值加不确定性权重乘标准差。该风险调整仍
+  属于总能耗目标，不是货币执行成本，也不能再叠加 lateness/violation 惩罚。
+
+- slack 越小，任务越接近子截止期；fuzzy 模式下它使用默认 eta=0.95 的风险
+  完成时刻。slack 为负表示即使采用当前最有利的可行 VM 风险估计也存在延期
+  风险，因此通常应给予更高优先级。
+- upward rank 反映从当前任务到出口的关键路径长度，可用于识别阻塞大量后继
+  任务的关键节点，但不应无条件压倒能耗和截止期因素。
+- min_incremental_energy 已是风险调整后的模糊边际能耗。执行时间、通信时间、
+  风险调整能耗的物理量纲不同，组合前必须做稳健归一化，
+  不能直接把秒、焦耳和无量纲风险相加。
+- ready_wait_time 可作为抗饥饿项：等待越久，适度提高优先级，避免短任务或
+  关键任务长期占据调度机会。
+- uncertainty 来自模糊处理能力与带宽导致的时长离散程度。高风险任务可获得
+  适度提前量，但风险项不应造成数值爆炸，也不应无条件压倒能耗和 slack。
+- 对负 slack 使用较强惩罚时，要牢记最终选择的是最小分数；可把风险作为负向
+  优先项，或用其他与符号约定一致的稳定表达式。
+- 避免只偏向最短任务或只偏向关键路径任务，否则可能造成能耗恶化或任务饥饿。
+- 优先使用均值绝对值、范围、标准差等带 epsilon 的稳定缩放，谨慎使用指数、
+  对数和复杂三角函数，避免溢出、非法定义域和极端敏感性。
+
+Structure-parameter feedback rules:
+- CMA-ES values are evidence about a fixed structure, not the final structural
+  design. The next LLM step should normally change a feature, interaction,
+  normalization, gate, or linear/nonlinear/piecewise form, then re-optimize.
+- Boundary contact may indicate an inadequate bound or functional form. Low
+  variance and weak perturbation effects may indicate redundancy or a feature
+  that should be conditionally enabled. Fragile DDL feasibility calls for a
+  smoother bounded gate or simpler normalization.
+- Parameter correlation is not causation. Use it only as a structural hint,
+  and make strong changes only when evidence persists across generations,
+  seeds, or scenarios. Never add complexity merely to fit one diagnostic.
+- DDL violations, tardiness, fuzzy energy, robustness, and complexity remain
+  lexicographic criteria; they must never be collapsed into a weighted sum.
+Counterfactual mechanism feedback rules:
+- Parameter diagnostics expose limitations of a fixed parameter space;
+  counterfactual diagnostics explain which concrete ready-task choice failed
+  under the same state and deterministic VM model. Use both kinds of evidence.
+- A local one-step comparison is mechanism evidence, not a strict causal proof.
+  Strong structural changes require repetition across decisions, seeds, or
+  scenarios; preserve reported counts and conflicts.
+- Convert repeated evidence only into feature, interaction, normalization,
+  conditional gate, nonlinear/piecewise, or smooth-risk changes. Do not hand
+  tune final continuous weights; every new structure must return to CMA-ES and
+  full feasibility-first evaluation.
+- Do not add complexity for an isolated case. DDL evidence has priority,
+  uncertainty modifies DDL risk, and energy is considered only when DDL risk
+  is comparable.

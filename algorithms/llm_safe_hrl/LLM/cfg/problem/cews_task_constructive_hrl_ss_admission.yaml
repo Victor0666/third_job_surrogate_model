@@ -1,0 +1,80 @@
+# Stage 12 offline admission context for the HRL SS resource topology.
+# This file is consumed only by the CEWS evaluator; it does not change the
+# default SeEvo problem configuration.
+problem_name: cews_task_constructive
+problem_type: constructive
+obj_type: min
+problem_size: 50
+func_name: get_task_priority
+
+description: >
+  Offline safety admission of get_task_priority_v2 rules for the HRL SS
+  topology. LLM code ranks ready tasks only; the CEWS evaluator retains its
+  deterministic VM controller.
+
+objective:
+  metric: total_energy
+
+constraints:
+  deadline_violation_rate_max: 0.0
+  comparison: feasibility_first
+
+fuzzy:
+  enabled: true
+  delta1: 0.75
+  delta2: 1.2
+  energy_uncertainty_weight: 1.0
+  deadline_eta: 0.95
+  use_fuzzy_deadline_constraint: true
+  resource_seed_mode: episode_seed
+  resource_seed_offset: 0
+
+normalization:
+  energy_scale: 0.001
+  lateness_scale: 300.0
+
+dataset:
+  scenario: SS
+  train_seeds: [1, 2, 3]
+  validation_seeds: [4, 5]
+  test_seeds: [201, 202, 203, 204, 205, 206, 207, 208, 209, 210, 211, 212, 213, 214, 215, 216, 217, 218, 219, 220, 221, 222, 223, 224, 225, 226, 227, 228, 229, 230]
+  dax_files:
+    - CyberShake_30.xml
+    - Epigenomics_24.xml
+    - Ligo_30.xml
+    - Montage_25.xml
+    - Sipht_29.xml
+  workflows_per_instance: 50
+  arrival_lambda: 0.03
+  horizon: 1000000000.0
+  deadline_mode: cache_fcfs
+  deadline_alpha_small: 2.0
+  deadline_alpha_large: 3.0
+  deadline_alpha_small_prob: 0.8
+
+safety:
+  max_decisions: 1000000
+  max_stalled_steps: 10
+
+admission_scope:
+  mode: resource_task_domain
+  resource_code: S
+  allowed_scenarios: [SS, MS, LS]
+  workflow_families:
+    - CyberShake
+    - Epigenomics
+    - Ligo
+    - Montage
+    - Sipht
+
+# 该段只由安全启发式注册器消费，不进入 CEWS objective，也不改变 SeEvo 的
+# 可行性优先比较。能耗阈值和跨 seed CV 是准入质量门槛，不是 reward penalty。
+admission:
+  policy_version: hrl_resS_50wf_3seed_v2
+  required_evaluation_seeds: [1, 2, 3]
+  minimum_evaluation_seed_count: 3
+  deadline_violation_rate_max: 0.0
+  max_fuzzy_lateness_max: 0.0
+  feasible_seed_rate_min: 1.0
+  fuzzy_energy_score_max: 330000.0
+  objective_cv_max: 0.05

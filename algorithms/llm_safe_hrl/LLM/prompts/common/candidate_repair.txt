@@ -1,0 +1,21 @@
+The previous candidate was rejected before simulation.
+
+Validation error:
+{validation_error}
+
+Return a corrected complete Python code block. Preserve the intended discrete
+rule structure where possible, but satisfy every contract below:
+
+1. Every PARAMS["name"] reference has exactly one matching PARAMETER_SCHEMA item.
+2. Every declared parameter is used by get_task_priority_v2.
+3. Numeric literals inside get_task_priority_v2 are restricted to -2, -1, 0,
+   1, and 2. Put all other tunable thresholds and coefficients in
+   PARAMETER_SCHEMA. Use NumPy facilities such as np.finfo when an immutable
+   numerical safeguard is needed instead of hiding a literal epsilon.
+4. Keep the exact eight-array function signature and return one finite score
+   per ready task; smaller scores have higher priority.
+5. Respect the configured parameter, branch, AST-depth, and interaction limits.
+6. Do not define PARAMS, select Host/VM, use loops, perform I/O, or use randomness.
+
+Before answering, audit the schema names against all PARAMS references and audit
+all function-body numeric literals. Output only one ```python ... ``` block.

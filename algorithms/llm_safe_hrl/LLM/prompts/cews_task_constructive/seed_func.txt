@@ -1,0 +1,79 @@
+import numpy as np
+
+
+def get_task_priority_v1(
+    min_exec_time,
+    min_comm_time,
+    min_incremental_energy,
+    slack,
+    upward_rank,
+    remaining_work,
+    ready_wait_time,
+    uncertainty
+):
+    """为当前 ready tasks 生成优先级分数；分数越小越先调度。
+
+    这是 SeEvo 的可执行种子，而不是最终固定策略。后续个体可以改变特征组合，
+    但必须继续满足相同的输入/输出、安全性和数值稳定性契约。
+    fuzzy 模式下 min_incremental_energy 已是风险调整模糊边际能耗，slack 已由
+    eta 风险完成时刻构造；DDL 仍是硬约束，不能与模糊总能耗加权求和。
+    """
+    # 防止归一化分母在所有元素均为 0 时变成 0。
+    eps = 1e-8
+
+    # 使用 np.asarray 做非原地类型转换。这里不修改调用方提供的输入数组。
+    # 八个数组的第 i 项必须始终描述同一个 ready task。
+    min_exec_time = np.asarray(min_exec_time, dtype=float)
+    min_comm_time = np.asarray(min_comm_time, dtype=float)
+    min_incremental_energy = np.asarray(
+        min_incremental_energy, dtype=float
+    )
+    slack = np.asarray(slack, dtype=float)
+    upward_rank = np.asarray(upward_rank, dtype=float)
+    remaining_work = np.asarray(remaining_work, dtype=float)
+    ready_wait_time = np.asarray(ready_wait_time, dtype=float)
+    uncertainty = np.asarray(uncertainty, dtype=float)
+
+    def normalize(x):
+        """按平均绝对值缩放，使秒、风险调整焦耳和无量纲特征具有可比数量级。"""
+        return x / (np.mean(np.abs(x)) + eps)
+
+    # 只截取负 slack 的绝对风险：slack>=0 时风险为 0，slack<0 时风险为 -slack。
+    deadline_risk = np.maximum(-slack, 0.0)
+
+
+    # slack 越小，urgency 越接近 1；slack 充足时 urgency 自动下降。
+    slack_scale = np.mean(np.abs(slack)) + eps
+
+    urgency = 1.0 / (
+        1.0
+        + np.maximum(slack, 0.0) / slack_scale
+    )
+
+    # 只对紧迫的高不确定任务给予提前量，
+    # 避免高不确定但 slack 充足的任务无条件抢占资源。
+    uncertainty_priority = (
+        normalize(uncertainty) * urgency
+    )
+
+    # 约定分数越小越优先：正系数会增大分数，负系数让高风险/关键/久候任务靠前。
+    # deadline_risk 使用绝对值较大的负权重，保证负 slack 任务获得紧急优先级，
+    # 这服务于 DDL 可行性约束，而不是把延期加入能耗目标。
+    score = (
+        0.25 * normalize(min_exec_time)
+        + 0.15 * normalize(min_comm_time)
+        + 0.25 * normalize(min_incremental_energy)
+        - 2.00 * normalize(deadline_risk)
+        + 0.10 * normalize(remaining_work)
+        - 0.10 * uncertainty_priority
+        - 0.15 * normalize(upward_rank)
+        - 0.05 * normalize(ready_wait_time)
+    )
+
+    # 最后一层数值保险；用有限大数替代意外出现的 NaN/无穷。
+    return np.nan_to_num(
+        score,
+        nan=1e12,
+        posinf=1e12,
+        neginf=-1e12
+    )

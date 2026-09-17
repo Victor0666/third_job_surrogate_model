@@ -1,0 +1,253 @@
+defaults:
+  # 先合并本文件，再加载问题专用配置。命令行仍可使用
+  # `problem=cews_task_constructive` 显式选择本问题。
+  - _self_
+  - problem: cews_task_constructive
+
+hydra:
+  run:
+    # Absolute, per-execution directory resolved from this LLM package, so
+    # launching from a different current directory does not change placement.
+    dir: ${runtime_output_root}
+  job:
+    chdir: True
+
+# The chosen algorithm
+# 选择使用的算法
+algorithm: seevo # Options: "seevo" (main algorithm with self-evolution), "reevo" (baseline comparison method)
+                 # 选项："seevo"（带自进化的主算法），"reevo"（基线对比方法）
+
+# Execution mode
+# 执行模式
+mode: train  # Options: "train" (normal evolution from seed), "test" (load trained rules from data_dir and run one iteration)
+             # 选项："train"（从种子开始正常进化），"test"（从 data_dir 加载已训练规则并运行一次迭代）
+data_dir: data  # Directory to load trained rules from (only used in test mode)
+                # 加载已训练规则的目录（仅在 test 模式下使用）
+
+# Single is the default main experiment; Multi is explicitly opt-in.
+protocol: single
+source_scenario: SS
+resource_scale: null
+ddl: T
+# Optional human-readable label. The collision-resistant execution ID remains
+# automatic and is never a DRL-EA run index such as a0.
+run_name: null
+execution_id: ${llm_execution_id:${run_name}}
+experiment_key: ${llm_experiment_key:${protocol},${source_scenario},${resource_scale},${ddl}}
+runtime_output_root: ${llm_runtime_output_root:${experiment_key},${execution_id}}
+
+# LLM parameters
+# 大语言模型参数
+model: qwen-plus # #gpt-3.5-turbo-0125  # LLM model (other options include gpt-4-turbo-preview; GLM-3-Turbo, GLM-4; and moonshot-v1-8k) 
+                 # 大语言模型（其他选项包括 gpt-4-turbo-preview、GLM-3-Turbo、GLM-4 和 moonshot-v1-8k）
+temperature: 1  # temperature for chat completion
+                # 聊天补全的温度参数
+# 留空时不在全局层覆盖算例编号，而是由问题 YAML 根据 train/test 模式
+# 分别读取 dataset.train_seeds 或 dataset.test_seeds。这样训练集与测试集
+# 的划分只在问题配置中维护，避免两个配置来源不一致。
+case_num: []
+
+# Main GA loop parameters
+# 主遗传算法循环参数
+max_fe: 20 # maximum number of function evaluations
+           # 最大函数评估次数
+pop_size: 20 # population size for GA
+             # 遗传算法的种群规模
+init_pop_size: 20 # initial population size for GA
+                  # 遗传算法的初始种群规模
+mutation_rate: 0.5 # mutation rate for GA
+                   # 遗传算法的变异率
+timeout: 100 # timeout for evaluation of a single heuristic
+             # 单个启发式规则评估的超时时间
+diversify_init_pop: True # whether to diversify the initial population
+
+# LLM contract recovery runs before CMA-ES or scheduling simulation. Invalid
+# responses are repaired using their exact parser error; the validated
+# parameterized reference is used only when an entire generated batch fails.
+candidate_generation:
+  validation_retries: 3
+  repair_temperature: 0.0
+  candidate_repair_workers: 20
+  use_validated_reference_fallback: true
+                          # 是否对初始种群进行多样化处理
+
+# Offline structure-parameter co-evolution. This is never used by the online
+# Manager-Host-VM decision path.
+parameter_optimization:
+  enabled: true
+  optimizer_seed: 0
+  max_parameters: 12
+  population_size: 6
+  max_generations: 4
+  initial_sigma: 0.25
+  stage_seed_counts:
+    quick: 1
+    refine: 3
+    confirm: 0  # all configured validation_seeds; skipped when that list is empty
+  # Evaluate every parameter vector on the same workload/resource scenarios.
+  # Empty means inherit the resolved Single/Multi training domain. A non-empty
+  # command-line override is accepted only when it exactly matches that domain.
+  scenario_ids: []
+  elite_fraction: 0.25
+  boundary_epsilon: 0.000001
+  sensitivity_epsilon: 0.02
+  correlation_threshold: 0.85
+  early_stop_patience: 3
+  cache_enabled: true
+  cache_path: parameter_evaluation_cache.json
+  cache_precision: 12
+  # The 30-core server reserves two cores for the SeEvo parent process and OS.
+  # CMA generations and diagnostic perturbations share this bounded pool;
+  # every child process is restricted to one BLAS thread.
+  max_parallel_evaluations: 28
+  max_branches: 6
+  max_ast_depth: 18
+  max_interactions: 8
+  performance_tolerance: 0.01
+  diagnostic_perturbations: true
+  diagnostic_seed_count: 2
+  diagnostic_replay_gate:
+    enabled: true
+    replay_workers: 20
+    max_trace_mb_per_structure: 128
+    max_trace_mb_total: 1024
+    delete_traces_after_use: true
+  auto_admission_enabled: true
+  admission_required: true
+  admission_config_path: cfg/problem/cews_task_constructive_hrl_ss_admission.yaml
+  # Filled by protocol_config.py with the isolated Single/Multi artifact path.
+  admission_manifest_path: null
+
+# Learned screening is confined to offline SeEvo structure selection and the
+# CMA refine stage.  Every retained best/elite and all validation/final paths
+# remain exact; any missing dependency/model/context mismatch fails open.
+surrogate:
+  enabled: true
+  random_seed: 0
+  retrain_every_exact_evaluations: 100
+  conservative_sigma: 1.0
+  schema_version: llm_surrogate_v1
+  dataset_path: surrogate/exact_labels.jsonl
+  checkpoint_path: surrogate/model_checkpoint.pkl
+  warmup:
+    min_structures: 20
+    min_exact_evaluations: 500
+  structure_gate:
+    initial_full_cma_fraction: 0.70
+    mature_full_cma_fraction: 0.50
+    min_true_structures: 2
+  parameter_gate:
+    min_exact_pairs: 12
+    min_true_candidates_per_generation: 3
+  active_learning:
+    uncertainty_fraction: 0.20
+    random_fraction: 0.10
+  fail_safe:
+    min_feasible_recall: 0.98
+    min_promising_recall: 0.90
+    audit_window: 100
+    min_audit_samples: 20
+    audit_every_generations: 10
+    stable_audit_every_generations: 30
+    stable_audit_rounds: 3
+
+# Offline decision-mechanism analysis. It runs only after CMA-ES has frozen
+# selected structures and is never imported by the online Manager path.
+counterfactual_feedback:
+  enabled: true
+  run_after_parameter_optimization: true
+  max_structures_per_generation: 2
+  include_top_feasible: 1
+  include_infeasible_low_energy: 1
+  scenario_ids: []
+  train_seed_count: 2
+  validation_seed_count: 0
+
+  trace:
+    max_traced_decisions_per_run: 200
+    max_critical_decisions_per_run: 12
+    store_full_ready_ids: true
+    store_full_ready_features: false
+
+  alternatives:
+    max_per_decision: 3
+    include_rule_runner_up: true
+    include_min_slack: true
+    include_max_upward_rank: true
+    include_min_energy: true
+    include_max_uncertainty: true
+
+  criticality:
+    slack_threshold: 0.0
+    uncertainty_threshold: 1.0
+    score_margin_threshold: 0.05
+    queue_congestion_threshold: 4
+
+  estimator:
+    mode: local_one_step
+    bounded_replay_enabled: false
+    bounded_replay_steps: 0
+    assert_state_immutability: true
+
+  aggregation:
+    min_repeated_evidence: 2
+    high_confidence_seed_count: 2
+    high_confidence_scenario_count: 2
+    max_representative_cases: 4
+    max_feedback_chars: 12000
+
+  # 关闭：这份 cache 的路径只由 output_root 决定，不含 structure_hash/scenario/
+  # seed，而回放已经是并发的（结构之间 + scenario×seed 之间两层），于是十几个
+  # eval.py 子进程会抢同一个 cache.json.tmp，在 Windows 上表现为 EACCES 或
+  # WinError 32。代价可忽略：命中缓存并不能省掉子进程和 episode 本身，只省
+  # compare() 那一步——实测 137 条共 4.4 s，而每次 put 都要全量重写 411 KB。
+  cache:
+    enabled: false
+    path: counterfactual_feedback/cache.json
+
+# Offline cross-generation stress states. This consumes only frozen-rule
+# counterfactual artifacts and never participates in CMA vectors or Manager IO.
+critical_state_replay:
+  enabled: true
+  run_after_counterfactual_feedback: true
+  strict_replay_gate: false
+
+  archive:
+    global_capacity: 300
+    per_category_capacity: 50
+    max_states_per_scenario: 120
+    max_states_per_workflow_type: 120
+    exact_duplicate_merge: true
+    semantic_similarity_enabled: true
+    semantic_signature_precision: 4
+    min_admission_confidence: medium
+    min_counterfactual_evidence_quality: medium
+    resolved_success_threshold: 3
+    hard_failure_threshold: 2
+    dormant_generation_threshold: 8
+    allow_validation_archive: false
+    near_zero_slack_threshold: 1.0
+    resource_bottleneck_threshold: 0.85
+    archive_path: critical_state_replay/archive/critical_state_archive.json
+
+  replay:
+    max_states_per_generation: 40
+    max_hard_states_per_generation: 20
+    max_new_states_per_generation: 10
+    resolved_replay_fraction: 0.1
+    max_states_per_semantic_cluster: 3
+    candidate_outcome_expansion_cap: 6
+    min_verified_candidate_coverage: 0.5
+    deterministic_sampling_seed: 0
+
+  feedback:
+    min_repeated_failure_count: 2
+    high_confidence_seed_count: 2
+    high_confidence_scenario_count: 2
+    max_failure_examples: 5
+    max_success_examples: 3
+    max_feedback_chars: 10000
+
+  cache:
+    enabled: true
+    path: critical_state_replay/replay_cache.json

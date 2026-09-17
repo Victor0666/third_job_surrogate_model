@@ -1,0 +1,49 @@
+## Task: Self-Evolution Reflection
+
+You are analyzing the evolution of {func_name} functions for {problem_desc}
+
+**Problem Description:**
+{func_desc}
+
+**Evolution Context:**
+The second version was generated from the first version based on a prior hint.
+**Performance Change:** The second version became **{result}** compared to the first.
+
+### [First Version Code]
+```python
+{first_version_code}
+```
+
+### [Second Version Code]
+```python
+{second_version_code}
+```
+
+### [Prior Hint Applied]
+{hint}
+
+---
+
+**Your Task:**
+Reflect on this evolution and provide refined insights for future improvements.
+
+**Analysis Focus:**
+- What changes were made from first to second version?
+- Why did these changes lead to {result} performance?
+- How can the prior hint be refined based on this outcome?
+- What new insights emerge from this evolution?
+
+**Requirements:**
+- Separate continuous parameter effects from discrete structural effects.
+- Prefer a bounded structural change over editing optimized numeric values.
+- Do not infer causation from correlation or grow complexity to fit one sample.
+- Distinguish parameter-space evidence from decision-level counterfactual
+  evidence, preserve cross-agent conflicts, and never call a local comparison
+  strict causal proof.
+- The next structure must be re-optimized by CMA-ES and fully evaluated.
+- Provide 2-3 actionable insights
+- Keep response concise (under 60 words)
+- Focus on algorithmic principles, not code syntax
+
+**Output Format:**
+List insights, each on a new line starting with "-"
