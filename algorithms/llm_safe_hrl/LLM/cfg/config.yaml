@@ -131,7 +131,7 @@ surrogate:
   checkpoint_path: surrogate/model_checkpoint.pkl
   warmup:
     min_structures: 20
-    min_exact_evaluations: 500
+    min_exact_evaluations: 300
   structure_gate:
     initial_full_cma_fraction: 0.70
     mature_full_cma_fraction: 0.50
@@ -143,8 +143,7 @@ surrogate:
     uncertainty_fraction: 0.20
     random_fraction: 0.10
   fail_safe:
-    min_feasible_recall: 0.98
-    min_promising_recall: 0.90
+    min_promising_recall: 0.80
     audit_window: 100
     min_audit_samples: 20
     audit_every_generations: 10

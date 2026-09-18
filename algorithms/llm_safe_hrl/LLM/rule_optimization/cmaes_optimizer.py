@@ -643,18 +643,8 @@ class CMAESOptimizer:
                         for index in decision.get("would_select_indices", selected)
                     )
                     for index in exact_indices:
-                        prediction = predictions[index] if index < len(predictions) else None
-                        actual_feasible = bool(
-                            exact_by_index[index].get("constraint_feasible", False)
-                        )
-                        predicted_feasible = bool(
-                            prediction is not None
-                            and prediction.metrics.get("constraint_feasible", False)
-                        )
                         audit(
                             gate="parameter",
-                            actual_feasible=actual_feasible,
-                            predicted_feasible=predicted_feasible,
                             actual_promising=index in promising_exact,
                             selected_for_exact=index in would_select,
                         )

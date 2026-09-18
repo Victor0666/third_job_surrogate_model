@@ -9,7 +9,7 @@ from typing import Any, Mapping
 @dataclass(frozen=True)
 class WarmupConfig:
     min_structures: int = 20
-    min_exact_evaluations: int = 500
+    min_exact_evaluations: int = 300
 
 
 @dataclass(frozen=True)
@@ -33,8 +33,7 @@ class ActiveLearningConfig:
 
 @dataclass(frozen=True)
 class FailSafeConfig:
-    min_feasible_recall: float = 0.98
-    min_promising_recall: float = 0.90
+    min_promising_recall: float = 0.80
     audit_window: int = 100
     min_audit_samples: int = 20
     audit_every_generations: int = 10
@@ -115,7 +114,6 @@ class SurrogateConfig:
                 self.active_learning.uncertainty_fraction
             ),
             "active_learning.random_fraction": self.active_learning.random_fraction,
-            "fail_safe.min_feasible_recall": self.fail_safe.min_feasible_recall,
             "fail_safe.min_promising_recall": self.fail_safe.min_promising_recall,
         }
         for name, number in fractions.items():

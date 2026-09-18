@@ -103,14 +103,11 @@ def _prediction(
     energy: float,
     *,
     feasible: bool = True,
-    probability: float = 0.9,
     uncertainty: float = 0.1,
 ) -> SurrogatePrediction:
     return SurrogatePrediction(
         _metrics(energy, feasible=feasible, violation=0.0 if feasible else 1.0),
-        {"feasibility": uncertainty, "violation": uncertainty,
-         "lateness": uncertainty, "energy": uncertainty},
-        probability,
+        {"violation": uncertainty, "lateness": uncertainty, "energy": uncertainty},
     )
 
 
@@ -203,7 +200,11 @@ class ModelAndManagerTests(unittest.TestCase):
                 min_true_candidates_per_generation=3,
             ),
             active_learning=ActiveLearningConfig(0.2, 0.1),
-            fail_safe=FailSafeConfig(0.98, 0.90, 10, 2),
+            fail_safe=FailSafeConfig(
+                min_promising_recall=0.90,
+                audit_window=10,
+                min_audit_samples=2,
+            ),
         )
         values.update(overrides)
         return SurrogateConfig(**values)
@@ -211,7 +212,13 @@ class ModelAndManagerTests(unittest.TestCase):
     def test_disabled_default_and_missing_sklearn_are_fail_open(self):
         self.assertFalse(SurrogateConfig().enabled)
         model = ExtraTreesMetricModel()
-        with mock.patch.dict(sys.modules, {"sklearn": None}):
+        with mock.patch.dict(
+            sys.modules,
+            {
+                "sklearn": None,
+                "sklearn.ensemble": None,
+            },
+        ):
             with self.assertRaisesRegex(RuntimeError, "scikit-learn"):
                 model.fit(
                     [
@@ -225,17 +232,11 @@ class ModelAndManagerTests(unittest.TestCase):
                     ]
                 )
 
-    def test_conservative_prediction_uses_feasibility_lcb_and_upper_bounds(self):
-        class ClassTree:
-            classes_ = np.asarray([0, 1])
-            def __init__(self, p): self.p = p
-            def predict_proba(self, row): return np.asarray([[1 - self.p, self.p]])
+    def test_conservative_prediction_uses_regression_upper_bounds(self):
         class RegTree:
             def __init__(self, value): self.value = value
             def predict(self, row): return np.asarray([self.value])
         model = ExtraTreesMetricModel(conservative_sigma=1.0)
-        model.classifier = SimpleNamespace(estimators_=[ClassTree(0.45), ClassTree(0.75)])
-        model.classifier_residual = 0.1
         model.regressors = {
             "violation": SimpleNamespace(estimators_=[RegTree(1.0), RegTree(3.0)]),
             "lateness": SimpleNamespace(estimators_=[RegTree(2.0), RegTree(4.0)]),
@@ -266,12 +267,11 @@ class ModelAndManagerTests(unittest.TestCase):
         model = ExtraTreesMetricModel(random_seed=17, conservative_sigma=1.0)
         model.fit(records)
         self.assertTrue(model.healthy, model.failure_reason)
-        self.assertGreaterEqual(model.validation_metrics["feasible_recall"], 0.98)
         self.assertGreaterEqual(model.validation_metrics["promising_recall"], 0.90)
+        self.assertEqual(model.mode, "ranking_only")
         self.assertEqual(set(model.regressors), {"violation", "lateness", "energy"})
         prediction = model.predict([1.0, 0.5], robustness=0.2)
         values = [
-            prediction.feasible_probability,
             prediction.total_uncertainty,
             prediction.metrics["constraint_violation"],
             prediction.metrics["total_lateness"],
@@ -283,14 +283,97 @@ class ModelAndManagerTests(unittest.TestCase):
         self.assertEqual(prediction.metrics, restored_prediction.metrics)
         self.assertEqual(prediction.uncertainty, restored_prediction.uncertainty)
 
+    def test_all_infeasible_records_train_ranking_only_model(self):
+        records = []
+        for index in range(60):
+            value = float(index) / 59.0
+            records.append(
+                {
+                    "features": [value, value * value],
+                    "label": {
+                        "constraint_feasible": False,
+                        "violation": 1.0 - 0.8 * value,
+                        "lateness": 20.0 - 10.0 * value,
+                        "energy": 30.0 + value,
+                    },
+                }
+            )
+        model = ExtraTreesMetricModel(random_seed=17, conservative_sigma=1.0)
+        model.fit(records)
+        self.assertTrue(model.healthy, model.failure_reason)
+        self.assertEqual(model.mode, "ranking_only")
+        self.assertNotIn("feasible_recall", model.validation_metrics)
+        prediction = model.predict([0.5, 0.25])
+        self.assertFalse(prediction.metrics["constraint_feasible"])
+        self.assertTrue(
+            np.isfinite(
+                [
+                    prediction.metrics["constraint_violation"],
+                    prediction.metrics["total_lateness"],
+                    prediction.metrics["objective"],
+                ]
+            ).all()
+        )
+
+    def test_all_feasible_records_also_train_ranking_only_model(self):
+        records = [
+            {
+                "features": [float(index), float(index % 3)],
+                "label": {
+                    "constraint_feasible": True,
+                    "violation": 0.0,
+                    "lateness": 0.0,
+                    "energy": float(100 - index),
+                },
+            }
+            for index in range(30)
+        ]
+        model = ExtraTreesMetricModel(random_seed=9)
+        model.fit(records)
+        self.assertTrue(model.healthy, model.failure_reason)
+        self.assertEqual(model.mode, "ranking_only")
+        self.assertEqual(set(model.regressors), set(model.TARGETS))
+
+    def test_ranking_only_model_is_validated_without_feasible_recall(self):
+        class RankingOnlyModel:
+            healthy = False
+            mode = "ranking_only"
+            failure_reason = "not_trained"
+            validation_metrics = {}
+
+            def fit(self, _records):
+                self.healthy = True
+                self.failure_reason = ""
+                self.validation_metrics = {
+                    "promising_recall": 1.0,
+                    "validation_samples": 10.0,
+                }
+
+        with tempfile.TemporaryDirectory() as directory:
+            manager = SurrogateManager(self._config(directory), _context())
+            manager.structure_model = RankingOnlyModel()
+            manager.parameter_model = RankingOnlyModel()
+            with mock.patch.object(manager, "_save_checkpoint"):
+                manager.retrain(force=True)
+            stats = manager.stats()
+        self.assertTrue(stats["models"]["structure"]["healthy"])
+        self.assertEqual(
+            stats["models"]["parameter"]["mode"],
+            "ranking_only",
+        )
+        self.assertTrue(stats["gates"]["structure"]["healthy"])
+        self.assertTrue(stats["gates"]["parameter"]["healthy"])
+
     def test_mature_structure_gate_keeps_bounded_active_learning_mix(self):
         candidate = parse_rule_candidate(_source())
         candidates = [candidate] * 8
         params = [{"weight": 1.0, "epsilon": 0.1}] * 8
         quick = [_metrics(10.0 + index) for index in range(8)]
         predictions = [
-            _prediction(10.0 + index, probability=0.5 if index == 6 else 0.9,
-                        uncertainty=9.0 if index == 7 else 0.1)
+            _prediction(
+                10.0 + index,
+                uncertainty=9.0 if index == 7 else 0.1,
+            )
             for index in range(8)
         ]
         with tempfile.TemporaryDirectory() as directory:
@@ -306,7 +389,6 @@ class ModelAndManagerTests(unittest.TestCase):
         all_reasons = {reason for reasons in first["reasons"].values() for reason in reasons}
         self.assertIn("predicted_promising", all_reasons)
         self.assertIn("high_uncertainty", all_reasons)
-        self.assertIn("feasibility_boundary", all_reasons)
         self.assertIn("deterministic_random", all_reasons)
 
     def test_warmup_and_nonfinite_predictions_both_release_every_candidate(self):
@@ -333,7 +415,7 @@ class ModelAndManagerTests(unittest.TestCase):
             self.assertFalse(decision["gate_used"])
             self.assertEqual(decision["selected_indices"], [0, 1])
 
-    def test_feasibility_priority_and_recall_failure_disable_gate(self):
+    def test_ddl_priority_and_promising_recall_failure_disable_gate(self):
         candidate = parse_rule_candidate(_source())
         with tempfile.TemporaryDirectory() as directory:
             config = self._config(
@@ -342,8 +424,8 @@ class ModelAndManagerTests(unittest.TestCase):
             )
             manager = SurrogateManager(config, _context())
             manager.parameter_model = _FakeModel([
-                _prediction(0.01, feasible=False, probability=0.1),
-                _prediction(100.0, feasible=True, probability=0.99),
+                _prediction(0.01, feasible=False),
+                _prediction(100.0, feasible=True),
             ])
             manager._model_ready = lambda kind: manager.healthy
             decision = manager.select_parameters(
@@ -353,8 +435,8 @@ class ModelAndManagerTests(unittest.TestCase):
                 generation=1,
             )
             self.assertEqual(decision["selected_indices"], [1])
-            manager.record_audit(feasible_found=False, promising_found=False)
-            manager.record_audit(feasible_found=False, promising_found=False)
+            manager.record_audit(promising_found=False)
+            manager.record_audit(promising_found=False)
             manager.finish_audit("parameter")
             self.assertIn(
                 "recall_below_threshold",
@@ -634,7 +716,6 @@ class IndependentRecallTests(unittest.TestCase):
                 parameter_gate=ParameterGateConfig(1, 1),
                 active_learning=ActiveLearningConfig(0.0, 0.0),
                 fail_safe=FailSafeConfig(
-                    min_feasible_recall=0.9,
                     min_promising_recall=0.9,
                     audit_window=20,
                     min_audit_samples=2,
@@ -647,7 +728,6 @@ class IndependentRecallTests(unittest.TestCase):
             for _ in range(2):
                 manager.record_audit(
                     gate="structure",
-                    feasible_found=True,
                     promising_found=True,
                 )
             manager.finish_audit("structure")
@@ -657,7 +737,6 @@ class IndependentRecallTests(unittest.TestCase):
             for _ in range(2):
                 manager.record_audit(
                     gate="parameter",
-                    feasible_found=False,
                     promising_found=False,
                 )
             manager.finish_audit("parameter")

@@ -67,10 +67,6 @@ class SurrogateManager:
         )
         self._lock = threading.RLock()
         self._new_exact = 0
-        self._audit_feasible = {
-            kind: deque(maxlen=config.fail_safe.audit_window)
-            for kind in ("structure", "parameter")
-        }
         self._audit_promising = {
             kind: deque(maxlen=config.fail_safe.audit_window)
             for kind in ("structure", "parameter")
@@ -163,11 +159,16 @@ class SurrogateManager:
                 try:
                     model.fit(self.dataset.records(kind))
                     if not model.healthy:
+                        self.gate_disabled_reasons[kind] = str(
+                            model.failure_reason
+                        )
                         continue
+                    promising_recall = model.validation_metrics.get(
+                        "promising_recall",
+                        0.0,
+                    )
                     validation_passed = (
-                        model.validation_metrics.get("feasible_recall", 0.0)
-                        >= self.config.fail_safe.min_feasible_recall
-                        and model.validation_metrics.get("promising_recall", 0.0)
+                        promising_recall
                         >= self.config.fail_safe.min_promising_recall
                     )
                     self.gate_disabled_reasons[kind] = (
@@ -175,7 +176,6 @@ class SurrogateManager:
                         else "model_validation_recall_below_threshold"
                     )
                     if validation_passed:
-                        self._audit_feasible[kind].clear()
                         self._audit_promising[kind].clear()
                         self._stable_audit_rounds[kind] = 0
                 except Exception as exc:
@@ -235,15 +235,9 @@ class SurrogateManager:
                         ),
                     )
                     top = set(ordered[:top_count])
-                    for structure_hash, metrics in actual.items():
+                    for structure_hash in actual:
                         self.record_audit(
                             gate="structure",
-                            actual_feasible=bool(metrics.get("constraint_feasible", False)),
-                            predicted_feasible=bool(
-                                pending["predictions"][structure_hash].metrics.get(
-                                    "constraint_feasible", False
-                                )
-                            ),
                             actual_promising=structure_hash in top,
                             selected_for_exact=structure_hash in pending["would_select"],
                         )
@@ -308,13 +302,6 @@ class SurrogateManager:
             range(count),
             key=lambda index: (-predictions[index].total_uncertainty, index),
         )
-        boundary = min(
-            range(count),
-            key=lambda index: (
-                abs(predictions[index].feasible_probability - 0.5),
-                index,
-            ),
-        )
         random_order = sorted(
             range(count),
             key=lambda index: hashlib.sha256(
@@ -325,7 +312,6 @@ class SurrogateManager:
         )
         anchors = [
             *((index, "high_uncertainty") for index in uncertainty_order[:uncertainty_quota]),
-            (boundary, "feasibility_boundary"),
             *((index, "deterministic_random") for index in random_order[:random_quota]),
         ]
         protected = {ordered[0]}
@@ -358,7 +344,6 @@ class SurrogateManager:
     def _validate_predictions(predictions: Sequence[SurrogatePrediction]) -> None:
         for prediction in predictions:
             values = [
-                prediction.feasible_probability,
                 prediction.total_uncertainty,
                 prediction.metrics.get("deadline_violation_rate"),
                 prediction.metrics.get("total_lateness"),
@@ -420,10 +405,6 @@ class SurrogateManager:
                         "expected": count,
                         "would_select": {
                             identities[index] for index in would_select
-                        },
-                        "predictions": {
-                            identities[index]: predictions[index]
-                            for index in range(count)
                         },
                         "actual": {},
                     }
@@ -509,21 +490,14 @@ class SurrogateManager:
         self,
         *,
         gate: str = "parameter",
-        actual_feasible: bool | None = None,
-        predicted_feasible: bool | None = None,
         actual_promising: bool | None = None,
         selected_for_exact: bool | None = None,
-        feasible_found: bool | None = None,
         promising_found: bool | None = None,
     ) -> None:
-        """Record positive-class recall evidence from a fully exact audit."""
+        """Record DDL-first Top-K recall evidence from a fully exact audit."""
         if gate not in self.gate_disabled_reasons:
             raise ValueError(f"unknown surrogate gate: {gate}")
         with self._lock:
-            if feasible_found is not None:
-                self._audit_feasible[gate].append(bool(feasible_found))
-            elif actual_feasible:
-                self._audit_feasible[gate].append(bool(predicted_feasible))
             if promising_found is not None:
                 self._audit_promising[gate].append(bool(promising_found))
             elif actual_promising:
@@ -535,21 +509,12 @@ class SurrogateManager:
             raise ValueError(f"unknown surrogate gate: {gate}")
         with self._lock:
             minimum = self.config.fail_safe.min_audit_samples
-            if (
-                len(self._audit_feasible[gate]) < minimum
-                or len(self._audit_promising[gate]) < minimum
-            ):
+            if len(self._audit_promising[gate]) < minimum:
                 return
-            feasible_recall = sum(self._audit_feasible[gate]) / len(
-                self._audit_feasible[gate]
-            )
             promising_recall = sum(self._audit_promising[gate]) / len(
                 self._audit_promising[gate]
             )
-            if feasible_recall < self.config.fail_safe.min_feasible_recall:
-                self.gate_disabled_reasons[gate] = "feasible_recall_below_threshold"
-                self._stable_audit_rounds[gate] = 0
-            elif promising_recall < self.config.fail_safe.min_promising_recall:
+            if promising_recall < self.config.fail_safe.min_promising_recall:
                 self.gate_disabled_reasons[gate] = "promising_recall_below_threshold"
                 self._stable_audit_rounds[gate] = 0
             else:
@@ -559,16 +524,13 @@ class SurrogateManager:
     def stats(self) -> dict[str, Any]:
         gate_stats = {}
         for gate in ("structure", "parameter"):
-            feasible = self._audit_feasible[gate]
             promising = self._audit_promising[gate]
             gate_stats[gate] = {
                 "healthy": self.gate_healthy(gate),
                 "disabled_reason": self.gate_disabled_reasons[gate],
-                "feasible_recall": sum(feasible) / len(feasible) if feasible else None,
                 "promising_recall": (
                     sum(promising) / len(promising) if promising else None
                 ),
-                "feasible_audit_positives": len(feasible),
                 "promising_audit_positives": len(promising),
                 "stable_audit_rounds": self._stable_audit_rounds[gate],
                 "audit_interval": self._audit_interval(gate),
@@ -582,5 +544,25 @@ class SurrogateManager:
             "gates": gate_stats,
             "structure_validation": dict(self.structure_model.validation_metrics),
             "parameter_validation": dict(self.parameter_model.validation_metrics),
+            "models": {
+                "structure": {
+                    "healthy": bool(self.structure_model.healthy),
+                    "mode": getattr(
+                        self.structure_model,
+                        "mode",
+                        "unknown",
+                    ),
+                    "failure_reason": str(self.structure_model.failure_reason),
+                },
+                "parameter": {
+                    "healthy": bool(self.parameter_model.healthy),
+                    "mode": getattr(
+                        self.parameter_model,
+                        "mode",
+                        "unknown",
+                    ),
+                    "failure_reason": str(self.parameter_model.failure_reason),
+                },
+            },
             "context_hash": self.context.context_hash,
         }
