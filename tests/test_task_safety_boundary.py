@@ -181,6 +181,17 @@ class RemainingCriticalPathTests(unittest.TestCase):
             [1, 3],
         )
 
+    def test_remaining_path_cache_returns_independent_exact_values(self):
+        environment = _task_boundary_environment(
+            children=[[1], []],
+            workloads=[10.0, 3.0],
+        )
+        first = environment.estimate_task_remaining_critical_path(0)
+        expected = environment.estimate_task_remaining_critical_path(0)
+        first["critical_path_task_ids_modal"].append(99)
+        third = environment.estimate_task_remaining_critical_path(0)
+        self.assertEqual(third, expected)
+
 
 class CandidateActionRiskTests(unittest.TestCase):
     """验证通信、排队、VM 风险和 Host 聚合均为只读预测。"""

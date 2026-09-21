@@ -212,6 +212,27 @@ class SafeReplayTransitionTests(unittest.TestCase):
             [0, 0],
         )
 
+    def test_training_only_stack_matches_full_training_fields(self):
+        rows = [_transition(), _transition(phase_id=4)]
+        full = stack_safe_replay_transitions(
+            rows,
+            input_dim=2,
+            action_dim=3,
+        )
+        training_only = stack_safe_replay_transitions(
+            rows,
+            input_dim=2,
+            action_dim=3,
+            include_audit_fields=False,
+        )
+        self.assertNotIn("legal_action_mask", training_only)
+        self.assertNotIn(
+            "performance_reward_components",
+            training_only,
+        )
+        for key, value in training_only.items():
+            np.testing.assert_array_equal(value, full[key])
+
     def test_fallback_can_use_hard_legal_action_when_final_mask_is_empty(self):
         transition = _transition(
             proposed_action=None,

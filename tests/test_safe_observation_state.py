@@ -267,6 +267,35 @@ class SafeObservationSchemaTests(unittest.TestCase):
                 )
             )
 
+    def test_runtime_caches_are_exact_and_state_versioned(self):
+        environment = self.environment
+        environment._dynamic_safety_margin_cache = None
+        environment._simulator_cache_stats[
+            "dynamic_safety_hits"
+        ] = 0
+        environment._scenario_duration_cache_audit = True
+
+        first = environment.get_dynamic_fuzzy_safety_margins()
+        second = environment.get_dynamic_fuzzy_safety_margins()
+        self.assertEqual(first, second)
+        self.assertEqual(
+            environment._simulator_cache_stats[
+                "dynamic_safety_hits"
+            ],
+            1,
+        )
+
+        previous_version = environment._safety_state_version
+        environment._mark_safety_state_changed()
+        self.assertEqual(
+            environment._safety_state_version,
+            previous_version + 1,
+        )
+        self.assertEqual(
+            first,
+            environment.get_dynamic_fuzzy_safety_margins(),
+        )
+
     def test_manager_recent_control_rates_use_bounded_window(self):
         environment = self.environment
         environment._safety_shield_records = [

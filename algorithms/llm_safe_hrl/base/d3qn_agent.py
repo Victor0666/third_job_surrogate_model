@@ -367,8 +367,8 @@ class D3QNAgent:
                 else "random_exploration"
             )
         else:
-            with torch.no_grad():
-                s = torch.tensor(
+            with torch.inference_mode():
+                s = torch.as_tensor(
                     state,
                     dtype=torch.float32,
                     device=self.device,
@@ -382,7 +382,7 @@ class D3QNAgent:
                     ).clone()
                 else:
                     score = q_r.clone()
-                m = torch.tensor(
+                m = torch.as_tensor(
                     selection_mask,
                     dtype=torch.float32,
                     device=self.device,
@@ -633,6 +633,7 @@ class D3QNAgent:
                 batch,
                 input_dim=self.input_dim,
                 action_dim=self.output_dim,
+                include_audit_fields=False,
             )
             s = safe_batch["state"]
             m = safe_batch["final_action_mask"]
@@ -661,18 +662,18 @@ class D3QNAgent:
             fallback_flags = None
             risk_categories = None
 
-        s = torch.tensor(s, dtype=torch.float32, device=self.device)
-        m = torch.tensor(m, dtype=torch.float32, device=self.device)
-        a = torch.tensor(a, dtype=torch.int64, device=self.device)
-        r = torch.tensor(r, dtype=torch.float32, device=self.device)
+        s = torch.as_tensor(s, dtype=torch.float32, device=self.device)
+        m = torch.as_tensor(m, dtype=torch.float32, device=self.device)
+        a = torch.as_tensor(a, dtype=torch.int64, device=self.device)
+        r = torch.as_tensor(r, dtype=torch.float32, device=self.device)
         c_tensor = (
-            torch.tensor(c, dtype=torch.float32, device=self.device)
+            torch.as_tensor(c, dtype=torch.float32, device=self.device)
             if c is not None
             else None
         )
-        s2 = torch.tensor(s2, dtype=torch.float32, device=self.device)
-        m2 = torch.tensor(m2, dtype=torch.float32, device=self.device)
-        d = torch.tensor(d, dtype=torch.float32, device=self.device)
+        s2 = torch.as_tensor(s2, dtype=torch.float32, device=self.device)
+        m2 = torch.as_tensor(m2, dtype=torch.float32, device=self.device)
+        d = torch.as_tensor(d, dtype=torch.float32, device=self.device)
 
         q_all = self.online(s)
         q_sa = q_all.gather(1, a.view(-1, 1)).squeeze(1)
@@ -779,37 +780,54 @@ class D3QNAgent:
                     self.q_c_online.state_dict()
                 )
 
+        diagnostic_tensors = [
+            reward_loss.detach(),
+            reward_target.detach().mean(),
+            reward_td_errors.detach().mean(),
+            a.detach().float().mean(),
+        ]
+        if self.safe_rl_enabled:
+            diagnostic_tensors.extend(
+                [
+                    safety_loss.detach(),
+                    weighted_safety_loss.detach(),
+                    safety_target.detach().mean(),
+                    safety_td_errors.detach().mean(),
+                ]
+            )
+        diagnostic_values = (
+            torch.stack(diagnostic_tensors)
+            .cpu()
+            .tolist()
+        )
+        performance_loss_value = float(diagnostic_values[0])
         self.last_update_info = {
-            "performance_loss": float(reward_loss.item()),
+            "performance_loss": performance_loss_value,
             "safety_loss": (
-                float(safety_loss.item())
-                if safety_loss is not None
+                float(diagnostic_values[4])
+                if self.safe_rl_enabled
                 else None
             ),
             "weighted_safety_loss": (
-                float(weighted_safety_loss.item())
-                if weighted_safety_loss is not None
+                float(diagnostic_values[5])
+                if self.safe_rl_enabled
                 else None
             ),
-            "performance_target_mean": float(
-                reward_target.mean().item()
-            ),
+            "performance_target_mean": float(diagnostic_values[1]),
             "safety_target_mean": (
-                float(safety_target.mean().item())
-                if safety_target is not None
+                float(diagnostic_values[6])
+                if self.safe_rl_enabled
                 else None
             ),
             "performance_td_error_mean": float(
-                reward_td_errors.mean().item()
+                diagnostic_values[2]
             ),
             "safety_td_error_mean": (
-                float(safety_td_errors.mean().item())
-                if safety_td_errors is not None
+                float(diagnostic_values[7])
+                if self.safe_rl_enabled
                 else None
             ),
-            "executed_action_mean": float(
-                a.detach().float().mean().item()
-            ),
+            "executed_action_mean": float(diagnostic_values[3]),
             "proposed_action_mean": (
                 float(np.mean(proposed_actions))
                 if proposed_actions is not None
@@ -850,7 +868,7 @@ class D3QNAgent:
             ),
         }
         # 保持旧 update() 返回性能 loss 浮点数。
-        return float(reward_loss.item())
+        return performance_loss_value
 
     def replay_state_dict(self) -> dict:
         """导出带版本号的 replay；不混入网络 checkpoint。"""
@@ -1004,6 +1022,7 @@ class D3QNAgent:
                 transitions,
                 input_dim=self.input_dim,
                 action_dim=self.output_dim,
+                include_audit_fields=False,
             )
 
         priorities = payload.get("priorities", [])

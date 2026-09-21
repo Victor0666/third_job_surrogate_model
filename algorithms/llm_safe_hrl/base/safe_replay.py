@@ -473,6 +473,7 @@ def stack_safe_replay_transitions(
     *,
     input_dim: int,
     action_dim: int,
+    include_audit_fields: bool = True,
 ) -> dict:
     """校验并堆叠安全 batch，显式拒绝旧 tuple replay。"""
     rows = list(transitions)
@@ -499,14 +500,8 @@ def stack_safe_replay_transitions(
     state, final_mask, action, reward, cost, next_state, next_mask, done = (
         map(np.asarray, training_columns)
     )
-    return {
+    batch = {
         "state": state.astype(np.float32, copy=False),
-        "legal_action_mask": np.stack(
-            [row.legal_action_mask for row in rows]
-        ).astype(np.float32, copy=False),
-        "safety_action_mask": np.stack(
-            [row.safety_action_mask for row in rows]
-        ).astype(np.float32, copy=False),
         "final_action_mask": final_mask.astype(
             np.float32,
             copy=False,
@@ -546,6 +541,21 @@ def stack_safe_replay_transitions(
             [row.fallback_triggered for row in rows],
             dtype=np.float32,
         ),
+        "risk_category": np.asarray(
+            [row.risk_category for row in rows],
+            dtype=object,
+        ),
+    }
+    if not include_audit_fields:
+        return batch
+
+    batch.update({
+        "legal_action_mask": np.stack(
+            [row.legal_action_mask for row in rows]
+        ).astype(np.float32, copy=False),
+        "safety_action_mask": np.stack(
+            [row.safety_action_mask for row in rows]
+        ).astype(np.float32, copy=False),
         "fuzzy_safety_margin": np.asarray(
             [row.fuzzy_safety_margin for row in rows],
             dtype=np.float32,
@@ -570,10 +580,6 @@ def stack_safe_replay_transitions(
             [row.policy_selection_type for row in rows],
             dtype=object,
         ),
-        "risk_category": np.asarray(
-            [row.risk_category for row in rows],
-            dtype=object,
-        ),
         "performance_reward_components": {
             key: np.asarray(
                 [
@@ -584,7 +590,8 @@ def stack_safe_replay_transitions(
             )
             for key in PERFORMANCE_REWARD_COMPONENTS
         },
-    }
+    })
+    return batch
 
 
 __all__ = [

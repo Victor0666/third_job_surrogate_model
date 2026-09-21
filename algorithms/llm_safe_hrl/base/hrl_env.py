@@ -55,6 +55,7 @@ import numpy as np
 
 import os
 import re
+from copy import deepcopy
 from collections import deque
 from functools import lru_cache
 
@@ -614,6 +615,19 @@ class HrlHeftEnv(gym.Env):
         )
         self.host_ids = sorted(self.hosts.keys())
         self.vm_ids = sorted(self.vms.keys())
+        # VM 的模糊算力/带宽在集群创建后不再改变。缓存时仍保留
+        # get_feasible_vms() 对 task 参数的原有校验与返回顺序。
+        self._feasible_vm_ids = tuple(
+            self._compute_feasible_vm_ids()
+        )
+        self._vm_index_by_id = {
+            int(vm_id): int(index)
+            for index, vm_id in enumerate(self.vm_ids)
+        }
+        self._feasible_vm_pairs = tuple(
+            (int(vm_id), self._vm_index_by_id[int(vm_id)])
+            for vm_id in self._feasible_vm_ids
+        )
         # 三场景时长只依赖 (task_id, vm_id, scenario)：vm.pc/vm.bw 在 create_cluster
         # 之后不再改写，task_mi/in_bits/out_bits 只在 reset 时重建并在工作流到达时
         # 追加（既有条目从不被修改）。因此缓存在 episode 内恒定，reset 时清空即可。
@@ -1546,10 +1560,18 @@ class HrlHeftEnv(gym.Env):
         vm_id = int(vm.vm_id) if hasattr(vm, "vm_id") else int(vm)
         if vm_id not in self.vms:
             raise ValueError(f"Unknown VM ID: {vm_id}")
-        try:
-            vm_index = self.vm_ids.index(vm_id)
-        except ValueError as exc:
-            raise ValueError(f"VM ID {vm_id} is not active in this environment.") from exc
+        index_by_id = getattr(self, "_vm_index_by_id", None)
+        if index_by_id is None:
+            index_by_id = {
+                int(candidate): int(index)
+                for index, candidate in enumerate(self.vm_ids)
+            }
+            self._vm_index_by_id = index_by_id
+        vm_index = index_by_id.get(vm_id)
+        if vm_index is None:
+            raise ValueError(
+                f"VM ID {vm_id} is not active in this environment."
+            )
         return vm_id, int(vm_index)
 
     def _task_deadline(self, task) -> float:
@@ -1592,6 +1614,21 @@ class HrlHeftEnv(gym.Env):
         """
         # _task_id 同时验证整数 ID 或 Task 对象可映射到当前环境任务。
         self._task_id(task)
+        cached = getattr(self, "_feasible_vm_ids", None)
+        if cached is None:
+            cached = tuple(self._compute_feasible_vm_ids())
+            self._feasible_vm_ids = cached
+        if getattr(self, "_scenario_duration_cache_audit", False):
+            actual = tuple(self._compute_feasible_vm_ids())
+            if actual != cached:
+                raise AssertionError(
+                    "feasible VM cache changed: "
+                    f"cached={cached}, actual={actual}"
+                )
+        return list(cached)
+
+    def _compute_feasible_vm_ids(self):
+        """Compute the immutable, task-independent feasible VM order."""
         feasible = []
         for vm_id in self.vm_ids:
             vm = self.vms[vm_id]
@@ -1670,6 +1707,21 @@ class HrlHeftEnv(gym.Env):
         """
         task_id = self._task_id(task_id)
         vm_id, _ = self._vm_id_and_index(vm_id)
+        return dict(
+            self._task_duration_components_ref(
+                task_id,
+                vm_id,
+                scenario,
+            )
+        )
+
+    def _task_duration_components_ref(
+        self,
+        task_id: int,
+        vm_id: int,
+        scenario: str,
+    ) -> dict:
+        """Return the internal immutable duration-cache value."""
         cache_key = (task_id, vm_id, str(scenario))
         # 缓存字典懒建：测试会用 object.__new__(HrlHeftEnv) 造只填了几个字段的
         # 替身，不走 __init__。这里绝不能用类属性做默认值，否则多个环境实例会
@@ -1698,7 +1750,7 @@ class HrlHeftEnv(gym.Env):
                     f"task_id={task_id}, vm_id={vm_id}, "
                     f"scenario={scenario}: {cached} -> {actual}"
                 )
-        return dict(cached)
+        return cached
 
     def _compute_task_duration_components_scenario(
         self,
@@ -1978,11 +2030,116 @@ class HrlHeftEnv(gym.Env):
     def _workflow_task_ids(self, workflow_id: int) -> list[int]:
         """返回属于指定工作流的全局任务编号。"""
         workflow_id = int(workflow_id)
-        return [
-            int(task_id)
-            for task_id, meta in enumerate(self.task_meta)
-            if int(meta[0]) == workflow_id
-        ]
+        cache = getattr(self, "_workflow_task_ids_cache", None)
+        if cache is None:
+            cache = {}
+            self._workflow_task_ids_cache = cache
+        task_ids = cache.get(workflow_id)
+        if task_ids is None:
+            task_ids = tuple(
+                int(task_id)
+                for task_id, meta in enumerate(self.task_meta)
+                if int(meta[0]) == workflow_id
+            )
+            cache[workflow_id] = task_ids
+        return list(task_ids)
+
+    def _mark_safety_state_changed(self) -> None:
+        """Invalidate caches whose values depend on mutable state."""
+        self._safety_state_version = int(
+            getattr(self, "_safety_state_version", 0)
+        ) + 1
+        self._host_vm_observation_cache = None
+
+    def _register_workflow_static_caches(
+        self,
+        workflow_id: int,
+        base_task_id: int,
+        tasks,
+        local_topological_order,
+    ) -> None:
+        """Record immutable task mappings once when a workflow arrives."""
+        workflow_id = int(workflow_id)
+        task_ids = tuple(
+            int(base_task_id + local_id)
+            for local_id in range(len(tasks))
+        )
+        local_to_global = {
+            int(local_id): int(base_task_id + local_id)
+            for local_id in range(len(tasks))
+        }
+        self._workflow_task_ids_cache[workflow_id] = task_ids
+        self._workflow_task_id_sets[workflow_id] = frozenset(task_ids)
+        self._workflow_local_to_global_cache[workflow_id] = (
+            local_to_global
+        )
+        self._workflow_topological_task_ids[workflow_id] = tuple(
+            int(base_task_id + local_id)
+            for local_id in local_topological_order
+        )
+        self._mark_safety_state_changed()
+
+    def _workflow_local_to_global(self, workflow_id: int) -> dict:
+        workflow_id = int(workflow_id)
+        cache = getattr(
+            self,
+            "_workflow_local_to_global_cache",
+            None,
+        )
+        if cache is None:
+            cache = {}
+            self._workflow_local_to_global_cache = cache
+        mapping = cache.get(workflow_id)
+        if mapping is None:
+            mapping = {
+                int(local_id): int(global_id)
+                for global_id, (wf_id, local_id) in enumerate(
+                    self.task_meta
+                )
+                if int(wf_id) == workflow_id
+            }
+            cache[workflow_id] = mapping
+        return mapping
+
+    def _workflow_topological_ids(
+        self,
+        workflow_id: int,
+    ) -> tuple[int, ...]:
+        workflow_id = int(workflow_id)
+        cache = getattr(
+            self,
+            "_workflow_topological_task_ids",
+            None,
+        )
+        if cache is None:
+            cache = {}
+            self._workflow_topological_task_ids = cache
+        cached = cache.get(workflow_id)
+        if cached is not None:
+            return tuple(cached)
+
+        task_ids = self._workflow_task_ids(workflow_id)
+        remaining = set(task_ids)
+        ordered = []
+        while remaining:
+            ready = [
+                task_id
+                for task_id in sorted(remaining)
+                if all(
+                    int(parent_id) not in remaining
+                    for parent_id in self.task_global_parents[task_id]
+                )
+            ]
+            if not ready:
+                raise ValueError(
+                    "Cannot predict workflow finish because its task graph "
+                    f"is cyclic or incomplete: workflow_id={workflow_id}"
+                )
+            ordered.extend(ready)
+            remaining.difference_update(ready)
+        cached = tuple(ordered)
+        cache[workflow_id] = cached
+        return cached
 
     def _known_task_finish_for_scenario(
         self,
@@ -2037,7 +2194,22 @@ class HrlHeftEnv(gym.Env):
         拓扑依赖，使用当前各 VM 可用时刻和该场景资源能力计算最早可行完成时刻；
         预测不预占后续 VM，因而只作为阶段 1 的过程风险诊断，不是安全屏蔽器。
         """
-        if scenario not in {"optimistic", "modal", "pessimistic"}:
+        return self._predict_workflow_finish_scenarios(
+            workflow_id,
+            (scenario,),
+        )[str(scenario)]
+
+    def _predict_workflow_finish_scenarios(
+        self,
+        workflow_id: int,
+        scenarios,
+    ) -> dict[str, float]:
+        """Traverse one workflow once while keeping scenario lanes separate."""
+        scenarios = tuple(str(value) for value in scenarios)
+        if any(
+            value not in {"optimistic", "modal", "pessimistic"}
+            for value in scenarios
+        ):
             raise ValueError(
                 "scenario must be 'optimistic', 'modal', or 'pessimistic'"
             )
@@ -2047,87 +2219,131 @@ class HrlHeftEnv(gym.Env):
             raise ValueError(
                 f"workflow_id={workflow_id} has no task in the environment"
             )
-        task_id_set = set(task_ids)
-        finish_by_task = {}
-        pending = set()
+        task_id_set = getattr(
+            self,
+            "_workflow_task_id_sets",
+            {},
+        ).get(workflow_id, frozenset(task_ids))
+        topological_ids = self._workflow_topological_ids(workflow_id)
+        finish_by_scenario = {
+            scenario: {} for scenario in scenarios
+        }
         for task_id in task_ids:
             if self.task_state[task_id] in {"Running", "Finished"}:
-                finish_by_task[task_id] = self._known_task_finish_for_scenario(
-                    task_id,
-                    scenario,
-                )
-            else:
-                pending.add(task_id)
-
-        if scenario == "modal":
-            vm_available = self.vm_available_at
-        else:
-            vm_available = self.shadow_vm_available_at[scenario]
+                for scenario in scenarios:
+                    finish_by_scenario[scenario][task_id] = (
+                        self._known_task_finish_for_scenario(
+                            task_id,
+                            scenario,
+                        )
+                    )
 
         workflow = self.workflows[workflow_id]
         arrival_time = float(workflow.arrival_time)
-        while pending:
-            progressed = False
-            for task_id in sorted(pending):
-                parents = [
-                    int(parent_id)
-                    for parent_id in self.task_global_parents[task_id]
-                    if int(parent_id) in task_id_set
-                ]
-                if any(parent_id not in finish_by_task for parent_id in parents):
-                    continue
+        feasible_pairs = getattr(self, "_feasible_vm_pairs", None)
+        if feasible_pairs is None:
+            feasible_pairs = tuple(
+                (
+                    int(vm_id),
+                    self._vm_id_and_index(vm_id)[1],
+                )
+                for vm_id in self.get_feasible_vms(task_ids[0])
+            )
+
+        for task_id in topological_ids:
+            if self.task_state[task_id] in {"Running", "Finished"}:
+                continue
+            parents = tuple(
+                int(parent_id)
+                for parent_id in self.task_global_parents[task_id]
+                if int(parent_id) in task_id_set
+            )
+            for scenario in scenarios:
+                finish_by_task = finish_by_scenario[scenario]
+                if any(
+                    parent_id not in finish_by_task
+                    for parent_id in parents
+                ):
+                    raise ValueError(
+                        "Cannot predict workflow finish because its task "
+                        "graph is cyclic or incomplete: "
+                        f"workflow_id={workflow_id}"
+                    )
                 parent_finish = max(
-                    (finish_by_task[parent_id] for parent_id in parents),
+                    (
+                        finish_by_task[parent_id]
+                        for parent_id in parents
+                    ),
                     default=arrival_time,
                 )
-                candidate_finishes = []
-                for vm_id in self.get_feasible_vms(task_id):
-                    _, vm_index = self._vm_id_and_index(vm_id)
+                vm_available = (
+                    self.vm_available_at
+                    if scenario == "modal"
+                    else self.shadow_vm_available_at[scenario]
+                )
+                best_finish = None
+                for vm_id, vm_index in feasible_pairs:
                     start_time = max(
                         float(self.current_time),
                         arrival_time,
                         float(parent_finish),
                         float(vm_available[vm_index]),
                     )
-                    candidate_finishes.append(
+                    candidate_finish = (
                         start_time
-                        + self.estimate_task_duration_scenario(
-                            task_id,
-                            vm_id,
-                            scenario,
+                        + float(
+                            self._task_duration_components_ref(
+                                task_id,
+                                vm_id,
+                                scenario,
+                            )["total_duration"]
                         )
                     )
-                if not candidate_finishes:
+                    if (
+                        best_finish is None
+                        or candidate_finish < best_finish
+                    ):
+                        best_finish = candidate_finish
+                if best_finish is None:
                     raise NoFeasibleVMError(
                         f"Task {task_id} has no feasible VM."
                     )
-                finish_by_task[task_id] = float(min(candidate_finishes))
-                pending.remove(task_id)
-                progressed = True
-            if not progressed:
-                raise ValueError(
-                    "Cannot predict workflow finish because its task graph "
-                    f"is cyclic or incomplete: workflow_id={workflow_id}"
-                )
-        return float(max(finish_by_task.values()))
+                finish_by_task[task_id] = float(best_finish)
+
+        return {
+            scenario: float(max(finish_by_scenario[scenario].values()))
+            for scenario in scenarios
+        }
 
     def predict_workflow_finish_tfn(
         self,
         workflow_id: int,
     ) -> TriangularFuzzyNumber:
         """返回未完成工作流在当前调度状态下的预测模糊完成时刻。"""
-        lower = self._predict_workflow_finish_scenario(
+        values = self._predict_workflow_finish_scenarios(
             workflow_id,
-            "optimistic",
+            ("optimistic", "modal", "pessimistic"),
         )
-        modal = self._predict_workflow_finish_scenario(
-            workflow_id,
-            "modal",
-        )
-        upper = self._predict_workflow_finish_scenario(
-            workflow_id,
-            "pessimistic",
-        )
+        lower = values["optimistic"]
+        modal = values["modal"]
+        upper = values["pessimistic"]
+        if getattr(self, "_scenario_duration_cache_audit", False):
+            serial_values = {
+                scenario: self._predict_workflow_finish_scenarios(
+                    workflow_id,
+                    (scenario,),
+                )[scenario]
+                for scenario in (
+                    "optimistic",
+                    "modal",
+                    "pessimistic",
+                )
+            }
+            if values != serial_values:
+                raise AssertionError(
+                    "combined workflow prediction changed results: "
+                    f"combined={values}, serial={serial_values}"
+                )
         tolerance = 1e-8
         if lower > modal + tolerance or modal > upper + tolerance:
             raise ValueError(
@@ -2153,11 +2369,7 @@ class HrlHeftEnv(gym.Env):
                 "scenario must be 'optimistic', 'modal', or 'pessimistic'"
             )
         workflow_id, _ = self.task_meta[task_id]
-        local_to_global = {
-            int(local_id): int(global_id)
-            for global_id, (wf_id, local_id) in enumerate(self.task_meta)
-            if int(wf_id) == int(workflow_id)
-        }
+        local_to_global = self._workflow_local_to_global(workflow_id)
         memo = {}
         visiting = set()
 
@@ -2185,12 +2397,10 @@ class HrlHeftEnv(gym.Env):
                 else:
                     vm_options = []
                     for vm_id in self.get_feasible_vms(child_id):
-                        components = (
-                            self.estimate_task_duration_components_scenario(
-                                child_id,
-                                vm_id,
-                                scenario,
-                            )
+                        components = self._task_duration_components_ref(
+                            child_id,
+                            vm_id,
+                            scenario,
                         )
                         vm_options.append(
                             {
@@ -2259,6 +2469,23 @@ class HrlHeftEnv(gym.Env):
     def estimate_task_remaining_critical_path(self, task) -> dict:
         """返回当前任务完成后剩余关键路径的三场景模糊时间预测。"""
         task_id = self._task_id(task)
+        cache = getattr(self, "_remaining_critical_path_cache", None)
+        if cache is None:
+            cache = {}
+            self._remaining_critical_path_cache = cache
+        cache_key = (
+            int(task_id),
+            int(getattr(self, "_finished_task_version", 0)),
+        )
+        cached = cache.get(cache_key)
+        audit = getattr(self, "_scenario_duration_cache_audit", False)
+        stats = getattr(self, "_simulator_cache_stats", None)
+        if cached is not None and not audit:
+            if stats is not None:
+                stats["critical_path_hits"] += 1
+            return deepcopy(cached)
+        if stats is not None:
+            stats["critical_path_misses"] += 1
         by_scenario = {
             scenario: self._remaining_critical_path_components_scenario(
                 task_id,
@@ -2282,7 +2509,7 @@ class HrlHeftEnv(gym.Env):
             max(modal, upper),
         )
         risk_time = self.fuzzy_deadline_measure(remaining_tfn)
-        return {
+        result = {
             "task_id": int(task_id),
             "excludes_current_task": True,
             "remaining_critical_path_lower": float(
@@ -2329,6 +2556,13 @@ class HrlHeftEnv(gym.Env):
             ),
             "prediction_is_safety_guarantee": False,
         }
+        if cached is not None and audit and cached != result:
+            raise AssertionError(
+                "remaining critical-path cache changed for "
+                f"task_id={task_id}: cached={cached}, actual={result}"
+            )
+        cache[cache_key] = deepcopy(result)
+        return result
 
     def _task_parent_placement_diagnostics(
         self,
@@ -2341,13 +2575,7 @@ class HrlHeftEnv(gym.Env):
         workflow_id, local_id = self.task_meta[task_id]
         task_obj = self.workflows[workflow_id].tasks[local_id]
         candidate_host_id = int(self.vms[vm_id].host_id)
-        local_to_global = {
-            int(candidate_local_id): int(global_id)
-            for global_id, (wf_id, candidate_local_id) in enumerate(
-                self.task_meta
-            )
-            if int(wf_id) == int(workflow_id)
-        }
+        local_to_global = self._workflow_local_to_global(workflow_id)
         same_vm_bits = 0.0
         same_host_bits = 0.0
         cross_host_bits = 0.0
@@ -2686,6 +2914,34 @@ class HrlHeftEnv(gym.Env):
         return float(np.clip(margin / deadline_budget, -1.0, 1.0))
 
     def get_dynamic_fuzzy_safety_margins(self) -> dict:
+        """Return a copy of the pure safety snapshot for current state."""
+        version = int(getattr(self, "_safety_state_version", 0))
+        cached = getattr(self, "_dynamic_safety_margin_cache", None)
+        audit = getattr(self, "_scenario_duration_cache_audit", False)
+        stats = getattr(self, "_simulator_cache_stats", None)
+        if cached is not None and int(cached[0]) == version:
+            if stats is not None:
+                stats["dynamic_safety_hits"] += 1
+            if not audit:
+                return deepcopy(cached[1])
+            actual = self._compute_dynamic_fuzzy_safety_margins()
+            if actual != cached[1]:
+                raise AssertionError(
+                    "dynamic safety-margin cache changed at state "
+                    f"version={version}"
+                )
+            return actual
+
+        if stats is not None:
+            stats["dynamic_safety_misses"] += 1
+        result = self._compute_dynamic_fuzzy_safety_margins()
+        self._dynamic_safety_margin_cache = (
+            version,
+            deepcopy(result),
+        )
+        return result
+
+    def _compute_dynamic_fuzzy_safety_margins(self) -> dict:
         """返回所有未完成工作流的统一动态模糊安全裕量。
 
         该接口只读取当前任务状态、DAG、VM 可用时刻与已有三条模糊时间线，
@@ -3755,6 +4011,7 @@ class HrlHeftEnv(gym.Env):
         if next_time <= self.current_time + 1e-12:
             next_time = self.current_time + 1e-9
         self.current_time = float(next_time)
+        self._mark_safety_state_changed()
         reward = float(self._energy_reward_to_current_time())
         self._process_finish_events_at_current_time()
         self._add_workflow_if_arrived()
@@ -4144,7 +4401,7 @@ class HrlHeftEnv(gym.Env):
                     )
                 )
                 continue
-            vm_index = self.vm_ids.index(int(vm_id))
+            vm_index = self._vm_index_by_id[int(vm_id)]
             vm = self.vms[int(vm_id)]
             energy = max(
                 0.0,
@@ -5329,9 +5586,29 @@ class HrlHeftEnv(gym.Env):
         self.assignment_history = []
         # remaining_work 只依赖本 episode 的 DAG，加载新工作流集合后缓存失效。
         self._remaining_work_cache = {}
+        self._workflow_task_ids_cache = {}
+        self._workflow_task_id_sets = {}
+        self._workflow_local_to_global_cache = {}
+        self._workflow_topological_task_ids = {}
+        self._remaining_critical_path_cache = {}
+        self._finished_task_version = 0
         # 三场景时长缓存同理：task_mi/in_bits/out_bits 在此重建，旧的 task_id
         # 不再对应同一任务，必须一并清空。
         self._scenario_duration_cache = {}
+        self._safety_state_version = 0
+        self._dynamic_safety_margin_cache = None
+        self._fuzzy_energy_summary_cache = None
+        self._host_vm_observation_cache = None
+        self._simulator_cache_stats = {
+            "dynamic_safety_hits": 0,
+            "dynamic_safety_misses": 0,
+            "fuzzy_energy_hits": 0,
+            "fuzzy_energy_misses": 0,
+            "critical_path_hits": 0,
+            "critical_path_misses": 0,
+            "observation_hits": 0,
+            "observation_misses": 0,
+        }
 
         self.ready_task_ids = []
         self.event_heap = []
@@ -5534,6 +5811,12 @@ class HrlHeftEnv(gym.Env):
                     self.ready_task_ids.append(gid)
 
             self.workflows.append(wf)
+            self._register_workflow_static_caches(
+                wf.workflow_id,
+                base,
+                tasks,
+                topo,
+            )
             self.next_arrival_idx += 1
             added = True
         return added
@@ -5624,6 +5907,38 @@ class HrlHeftEnv(gym.Env):
         return float(r_total)
 
     def get_fuzzy_energy_summary(self) -> dict:
+        """Return the cached energy replay for append-only record lists."""
+        signature = (
+            len(self._records),
+            len(self.shadow_records["optimistic"]),
+            len(self.shadow_records["pessimistic"]),
+        )
+        cached = getattr(self, "_fuzzy_energy_summary_cache", None)
+        audit = getattr(self, "_scenario_duration_cache_audit", False)
+        stats = getattr(self, "_simulator_cache_stats", None)
+        if cached is not None and cached[0] == signature:
+            if stats is not None:
+                stats["fuzzy_energy_hits"] += 1
+            if not audit:
+                return dict(cached[1])
+            actual = self._compute_fuzzy_energy_summary()
+            if actual != cached[1]:
+                raise AssertionError(
+                    "fuzzy energy cache changed for record signature "
+                    f"{signature}"
+                )
+            return actual
+
+        if stats is not None:
+            stats["fuzzy_energy_misses"] += 1
+        result = self._compute_fuzzy_energy_summary()
+        self._fuzzy_energy_summary_cache = (
+            signature,
+            dict(result),
+        )
+        return result
+
+    def _compute_fuzzy_energy_summary(self) -> dict:
         """重放三场景 Host 负载时间线并返回风险调整模糊总能耗。
 
         modal 能耗始终用原 ``_records`` 与 Host modal 总处理能力重新积分。启用
@@ -5711,6 +6026,7 @@ class HrlHeftEnv(gym.Env):
                     self.done_flag = True
                     break
                 self.current_time += 1e-9
+                self._mark_safety_state_changed()
                 r0, rb = self._energy_reward_to_current_time_with_breakdown()
                 r_energy += float(r0)
                 for h in self.host_ids:
@@ -5722,6 +6038,7 @@ class HrlHeftEnv(gym.Env):
                 next_t = self.current_time + 1e-9
 
             self.current_time = next_t
+            self._mark_safety_state_changed()
             r0, rb = self._energy_reward_to_current_time_with_breakdown()
             r_energy += float(r0)
             for h in self.host_ids:
@@ -5742,10 +6059,12 @@ class HrlHeftEnv(gym.Env):
 
     def _process_finish_events_at_current_time(self):
         """处理当前时刻的任务完成事件并释放满足依赖的子任务"""
+        processed_finish = False
         while len(self.event_heap) > 0 and self.event_heap[0][0] <= self.current_time + 1e-12:
             _, etype, task_id, vm_idx = heapq.heappop(self.event_heap)
             if etype != "finish":
                 continue
+            processed_finish = True
             self.task_state[task_id] = "Finished"
             self.task_end_time[task_id] = self.current_time
 
@@ -5772,22 +6091,15 @@ class HrlHeftEnv(gym.Env):
                     self.ep_wf_lateness_sum += float(wf_finish_late)
 
             wf_idx, _ = self.task_meta[task_id]
+            local_to_global = self._workflow_local_to_global(wf_idx)
             for child_local in self.task_children[task_id]:
-                child_gid = None
-                for gid, meta in enumerate(self.task_meta):
-                    if meta[0] == wf_idx and meta[1] == child_local:
-                        child_gid = gid
-                        break
+                child_gid = local_to_global.get(int(child_local))
                 if child_gid is None:
                     continue
                 if self.task_state[child_gid] == "unReady":
                     all_ok = True
                     for p_local in self.task_parents[child_gid]:
-                        p_gid = None
-                        for gid, meta in enumerate(self.task_meta):
-                            if meta[0] == wf_idx and meta[1] == p_local:
-                                p_gid = gid
-                                break
+                        p_gid = local_to_global.get(int(p_local))
                         if p_gid is None or self.task_state[p_gid] != "Finished":
                             all_ok = False
                             break
@@ -5801,6 +6113,11 @@ class HrlHeftEnv(gym.Env):
                         self.ready_task_ids.append(child_gid)
 
         self.ready_task_ids = [tid for tid in self.ready_task_ids if self.task_state[tid] == "Ready"]
+        if processed_finish:
+            self._finished_task_version = int(
+                getattr(self, "_finished_task_version", 0)
+            ) + 1
+            self._mark_safety_state_changed()
 
     def _compute_task_heuristics_for_ready(self):
         """计算所有就绪任务的五维启发式特征"""
@@ -6157,9 +6474,19 @@ class HrlHeftEnv(gym.Env):
 
     def _build_host_obs_for_task(self, tid: int):
         """拼接 HostAgent 观测并标记具有空闲 VM 的可选主机"""
-        block1, _, _, _ = self._compute_block1(tid)
+        block1, in_bits, out_bits, mi = self._compute_block1(tid)
         block2 = self._compute_block2()
         host_block = self._compute_host_block()
+        self._host_vm_observation_cache = (
+            int(getattr(self, "_safety_state_version", 0)),
+            int(tid),
+            block1,
+            float(in_bits),
+            float(out_bits),
+            float(mi),
+            block2,
+            host_block,
+        )
 
         obs = np.concatenate([block1, block2, host_block.reshape(-1)], axis=0)
 
@@ -6177,9 +6504,59 @@ class HrlHeftEnv(gym.Env):
 
     def _build_vm_obs_for_task_host(self, tid: int, host_id: int):
         """拼接 VMAgent 观测并标记目标主机上的空闲 VM 槽位"""
-        block1, in_bits, out_bits, mi = self._compute_block1(tid)
-        block2 = self._compute_block2()
-        host_block_all = self._compute_host_block()
+        version = int(getattr(self, "_safety_state_version", 0))
+        cached = getattr(self, "_host_vm_observation_cache", None)
+        stats = getattr(self, "_simulator_cache_stats", None)
+        if (
+            cached is not None
+            and cached[0] == version
+            and cached[1] == int(tid)
+        ):
+            if stats is not None:
+                stats["observation_hits"] += 1
+            (
+                _,
+                _,
+                block1,
+                in_bits,
+                out_bits,
+                mi,
+                block2,
+                host_block_all,
+            ) = cached
+            if getattr(self, "_scenario_duration_cache_audit", False):
+                actual_block1, actual_in, actual_out, actual_mi = (
+                    self._compute_block1(tid)
+                )
+                actual_block2 = self._compute_block2()
+                actual_host_block = self._compute_host_block()
+                if not (
+                    np.array_equal(block1, actual_block1)
+                    and float(in_bits) == float(actual_in)
+                    and float(out_bits) == float(actual_out)
+                    and float(mi) == float(actual_mi)
+                    and np.array_equal(block2, actual_block2)
+                    and np.array_equal(host_block_all, actual_host_block)
+                ):
+                    raise AssertionError(
+                        "Host/VM observation cache changed values"
+                    )
+        else:
+            if stats is not None:
+                stats["observation_misses"] += 1
+            block1, in_bits, out_bits, mi = self._compute_block1(tid)
+            block2 = self._compute_block2()
+            host_block_all = self._compute_host_block()
+            self._host_vm_observation_cache = (
+                version,
+                int(tid),
+                block1,
+                float(in_bits),
+                float(out_bits),
+                float(mi),
+                block2,
+                host_block_all,
+            )
         hi = self.host_ids.index(host_id)
         host_feat = host_block_all[hi].astype(np.float32)
 
@@ -6380,6 +6757,7 @@ class HrlHeftEnv(gym.Env):
         task_obj.assigned_vm_id = int(vm_id)
         task_obj.start_processing_time = float(start_time)
         task_obj.end_processing_time = float(end_time)
+        self._mark_safety_state_changed()
 
     def _vm_serial_order(self):
         """按可用时间、处理能力和索引生成稳定的 VM 排序"""
@@ -6805,6 +7183,12 @@ class HrlFcfsCacheEnv(HrlHeftEnv):
                     self.ready_task_ids.append(gid)
 
             self.workflows.append(wf)
+            self._register_workflow_static_caches(
+                wf.workflow_id,
+                base,
+                tasks,
+                topo,
+            )
             self.next_arrival_idx += 1
             added = True
 

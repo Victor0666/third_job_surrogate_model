@@ -166,6 +166,12 @@ class FuzzyEnergyReplayTests(unittest.TestCase):
             summary["fuzzy_total_energy_score"], old_modal_energy
         )
 
+        environment._scenario_duration_cache_audit = True
+        self.assertEqual(
+            environment.get_fuzzy_energy_summary(),
+            summary,
+        )
+
     def test_same_seed_same_fuzzy_resources(self):
         config = _small_config(fuzzy_enabled=True)
         first = build_environment(config, 7)

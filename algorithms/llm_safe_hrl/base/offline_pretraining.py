@@ -143,6 +143,7 @@ def _tensor_batch(
         rows,
         input_dim=agent.input_dim,
         action_dim=agent.output_dim,
+        include_audit_fields=False,
     )
     device = agent.device
     return {

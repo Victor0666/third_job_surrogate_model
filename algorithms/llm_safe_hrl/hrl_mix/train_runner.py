@@ -660,7 +660,7 @@ def train(
     protocol: str | None = None,
     source_scenario: str | None = None,
     resource_scale: str | None = None,
-    validation_workers: int = 1,
+    validation_workers: int = 3,
 ):
     """执行一次完整训练
 
@@ -668,7 +668,7 @@ def train(
     - scenario：两位场景代码，例如 SS 表示 small task + small resource
     - ddl：deadline 条件，例如 T/M/L 或 Tight/Medium/Loose
     - max_episodes：可选训练轮数；为空时使用配置默认值
-    - validation_workers：验证评估的工作进程数。``1``（默认）完全不建进程
+    - validation_workers：验证评估的工作进程数。``3`` 默认匹配三个验证 seed；``1`` 完全不建进程
       池，与改动前逐字相同；``0`` 表示自动取 ``cpu_count - 2``。worker 与父
       进程同设备，返回值按 seed 顺序聚合，因此与串行逐位一致。
     """
