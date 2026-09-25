@@ -38,6 +38,7 @@ from algorithms.llm_safe_hrl.scenario_registry import (
     workload_category_counts,
 )
 from hrl_mix.train_config import build_train_config
+from hrl_mix.train_runner import scenario_for_training_episode
 from base.hrl_env import HrlFcfsCacheEnv
 from algorithms.comparisons.fcfs.generate_deadline_cache import (
     generate_exact_deadline_cache,
@@ -159,26 +160,32 @@ def test_formal_seed_contracts_cannot_be_overridden():
 def test_formal_rl_lengths_validation_cadence_and_curriculum_ablation():
     with pytest.MonkeyPatch.context() as monkeypatch:
         monkeypatch.setattr("hrl_mix.train_config.os.makedirs", lambda *args, **kwargs: None)
-        full = build_train_config(protocol="single", source_scenario="SS")
+        formal = build_train_config(protocol="single", source_scenario="SS")
         ablation = build_train_config(
             protocol="single",
             source_scenario="SS",
-            safe_rl_curriculum_enabled=False,
+            safe_rl_curriculum_enabled=True,
         )
-    for config in (full, ablation):
+    for config in (formal, ablation):
         assert config.max_episodes == 600
         assert config.validation_interval == 25
         assert config.train_seeds == (1, 2, 3, 4, 5)
         assert config.validation_seeds == (101, 102, 103)
         assert config.final_test_seeds == tuple(range(201, 231))
-    assert full.curriculum_enabled is True
-    assert ablation.curriculum_enabled is False
+    assert formal.curriculum_enabled is False
+    assert ablation.curriculum_enabled is True
+    assert {
+        scenario_for_training_episode(formal, episode)
+        for episode in range(600)
+    } == {"SS"}
+    assert formal.arrival_lambda == 0.03
+    assert formal.workflows_per_episode == 50
 
 
 def test_safe_hrl_curriculum_and_algorithm_seed_use_distinct_artifact_names():
     with pytest.MonkeyPatch.context() as monkeypatch:
         monkeypatch.setattr("hrl_mix.train_config.os.makedirs", lambda *args, **kwargs: None)
-        full = build_train_config(
+        formal = build_train_config(
             protocol="single",
             source_scenario="SS",
             safe_rl_enabled=True,
@@ -188,7 +195,7 @@ def test_safe_hrl_curriculum_and_algorithm_seed_use_distinct_artifact_names():
             protocol="single",
             source_scenario="SS",
             safe_rl_enabled=True,
-            safe_rl_curriculum_enabled=False,
+            safe_rl_curriculum_enabled=True,
             optimizer_seed=7,
         )
         other_algorithm_seed = build_train_config(
@@ -197,7 +204,7 @@ def test_safe_hrl_curriculum_and_algorithm_seed_use_distinct_artifact_names():
             safe_rl_enabled=True,
             optimizer_seed=8,
         )
-    assert len({full.run_name, ablation.run_name, other_algorithm_seed.run_name}) == 3
+    assert len({formal.run_name, ablation.run_name, other_algorithm_seed.run_name}) == 3
 
 
 def test_drlea_formal_defaults_are_single_300_plus_300_and_25():

@@ -120,18 +120,27 @@ def main(argv=None):
         ),
     )
     parser.add_argument(
+        "--safe-rl-lambda-lr",
+        type=float,
+        default=0.05,
+        help="Episode violation-rate Lagrange learning rate (default: 0.05).",
+    )
+    parser.add_argument(
         "--safe-rl-heuristic-manager",
         action="store_true",
         help=(
             "Enable stage-11 heuristic_selection_mode: Manager "
-            "chooses an admitted FCFS/SJF/MCF/HUR/EDF/SeEvo "
-            "ready-task rule index. Requires --safe-rl, "
+            "chooses an admitted Top-K LLM ready-task rule index. "
+            "Traditional heuristics are available only through the "
+            "explicit ablation flag. Requires --safe-rl, "
             "--safe-rl-shield, and --safe-rl-state. Default is off; "
             "the legacy five-rule weight-delta Manager is preserved."
         ),
     )
-    parser.add_argument(
+    manager_heuristic_group = parser.add_mutually_exclusive_group()
+    manager_heuristic_group.add_argument(
         "--llm-only-heuristics",
+        dest="manager_heuristic_llm_only",
         action="store_true",
         help=(
             "Remove the five built-in FCFS/SJF/MCF/HUR/EDF action "
@@ -141,9 +150,19 @@ def main(argv=None):
             "off. The Manager action dimension and heuristic action "
             "schema version both change, so runs with and without "
             "this flag get separate output directories and are not "
-            "checkpoint-compatible."
+            "checkpoint-compatible. This is the Safe-HRL default."
         ),
     )
+    manager_heuristic_group.add_argument(
+        "--with-traditional-heuristics",
+        dest="manager_heuristic_llm_only",
+        action="store_false",
+        help=(
+            "Ablation: add FCFS/SJF/MCF/HUR/EDF actions to the "
+            "heuristic Manager."
+        ),
+    )
+    parser.set_defaults(manager_heuristic_llm_only=None)
     parser.add_argument(
         "--manager-heuristic-manifest",
         default=None,
@@ -212,14 +231,26 @@ def main(argv=None):
             "heuristic-Manager switches."
         ),
     )
-    parser.add_argument(
+    curriculum_group = parser.add_mutually_exclusive_group()
+    curriculum_group.add_argument(
         "--without-curriculum",
-        action="store_true",
+        dest="safe_rl_curriculum_enabled",
+        action="store_false",
         help=(
-            "Ablation: keep all Safe-HRL components and 600 total episodes, "
-            "but always train on the formal target scenario configuration."
+            "Keep all Safe-HRL components and 600 total episodes on "
+            "the formal target scenario configuration (default)."
         ),
     )
+    curriculum_group.add_argument(
+        "--with-curriculum",
+        dest="safe_rl_curriculum_enabled",
+        action="store_true",
+        help=(
+            "Ablation: enable the staged curriculum profiles from the "
+            "safe training pipeline."
+        ),
+    )
+    parser.set_defaults(safe_rl_curriculum_enabled=False)
     parser.add_argument(
         "--safe-training-resume",
         default=None,
@@ -274,10 +305,13 @@ def main(argv=None):
         safe_rl_dynamic_lambda_enabled=(
             args.safe_rl_dynamic_lambda
         ),
+        safe_rl_lambda_lr=args.safe_rl_lambda_lr,
         safe_rl_heuristic_manager_enabled=(
             args.safe_rl_heuristic_manager
         ),
-        manager_heuristic_llm_only=args.llm_only_heuristics,
+        manager_heuristic_llm_only=(
+            args.manager_heuristic_llm_only
+        ),
         manager_heuristic_manifest=(
             args.manager_heuristic_manifest
         ),
@@ -304,7 +338,7 @@ def main(argv=None):
             args.safe_training_resume
         ),
         safe_rl_curriculum_enabled=(
-            not args.without_curriculum
+            args.safe_rl_curriculum_enabled
         ),
         optimizer_seed=args.optimizer_seed,
         deadline_cache_override=deadline_cache_paths.get(source_scenario),

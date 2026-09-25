@@ -361,6 +361,11 @@ class HrlHeftEnv(gym.Env):
         fuzzy_use_deadline_constraint=True,
         safe_rl_enabled=False,
         safe_rl_process_risk_aggregation="mean",
+        safe_rl_lateness_normalizer=300.0,
+        safe_rl_lateness_clip=5.0,
+        safe_rl_delta_risk_weight=0.5,
+        safe_rl_violation_weight=1.0,
+        safe_rl_lateness_weight=1.0,
         safe_rl_shield_enabled=False,
         safe_rl_fallback_controller="fixed_vm_rule",
         safe_rl_state_enabled=False,
@@ -404,6 +409,21 @@ class HrlHeftEnv(gym.Env):
         self.safe_rl_process_risk_aggregation = str(
             safe_rl_process_risk_aggregation
         ).strip().lower()
+        self.safe_rl_lateness_normalizer = float(
+            safe_rl_lateness_normalizer
+        )
+        self.safe_rl_lateness_clip = float(
+            safe_rl_lateness_clip
+        )
+        self.safe_rl_delta_risk_weight = float(
+            safe_rl_delta_risk_weight
+        )
+        self.safe_rl_violation_weight = float(
+            safe_rl_violation_weight
+        )
+        self.safe_rl_lateness_weight = float(
+            safe_rl_lateness_weight
+        )
         self.safe_rl_shield_enabled = bool(
             safe_rl_shield_enabled
         )
@@ -494,6 +514,32 @@ class HrlHeftEnv(gym.Env):
                 "safe_rl_process_risk_aggregation currently supports "
                 "only 'mean'"
             )
+        if (
+            not np.isfinite(self.safe_rl_lateness_normalizer)
+            or self.safe_rl_lateness_normalizer <= 0.0
+        ):
+            raise ValueError(
+                "safe_rl_lateness_normalizer must be finite and positive"
+            )
+        for name, value in (
+            ("safe_rl_lateness_clip", self.safe_rl_lateness_clip),
+            (
+                "safe_rl_delta_risk_weight",
+                self.safe_rl_delta_risk_weight,
+            ),
+            (
+                "safe_rl_violation_weight",
+                self.safe_rl_violation_weight,
+            ),
+            (
+                "safe_rl_lateness_weight",
+                self.safe_rl_lateness_weight,
+            ),
+        ):
+            if not np.isfinite(value) or value < 0.0:
+                raise ValueError(
+                    f"{name} must be finite and non-negative"
+                )
         if (
             not np.isfinite(self.fuzzy_energy_uncertainty_weight)
             or self.fuzzy_energy_uncertainty_weight < 0.0
@@ -1942,10 +1988,34 @@ class HrlHeftEnv(gym.Env):
             )
         )
 
+    @staticmethod
+    def _mean_process_risk(safety_snapshot: dict) -> float:
+        """复用现有 workflow process-risk 定义计算系统平均风险。"""
+        risks = [
+            float(row.get("process_risk_cost", 0.0))
+            for row in safety_snapshot.get(
+                "workflow_safety_margins", ()
+            )
+        ]
+        return float(np.mean(risks)) if risks else 0.0
+
+    def _current_mean_process_risk(self) -> float:
+        if not getattr(self, "safe_rl_enabled", False):
+            return 0.0
+        return self._mean_process_risk(
+            self.get_dynamic_fuzzy_safety_margins()
+        )
+
     def _empty_safety_info(self) -> dict:
         """返回字段稳定的零安全代价信息。"""
         return {
             "safety_cost": 0.0,
+            "positive_delta_risk": 0.0,
+            "normalized_lateness": 0.0,
+            "violation_cost": 0.0,
+            "process_risk_before": 0.0,
+            "process_risk_after": 0.0,
+            "raw_fuzzy_lateness_seconds": 0.0,
             "deadline_violation_cost": 0.0,
             "fuzzy_lateness_cost": 0.0,
             "process_risk_cost": 0.0,
@@ -2005,6 +2075,13 @@ class HrlHeftEnv(gym.Env):
                     0.0,
                 )
             ),
+            "cumulative_normalized_lateness": float(
+                getattr(
+                    self,
+                    "_safety_cumulative_normalized_lateness",
+                    0.0,
+                )
+            ),
             "cumulative_process_risk_cost": float(
                 getattr(
                     self,
@@ -2016,8 +2093,9 @@ class HrlHeftEnv(gym.Env):
                 getattr(self, "safe_rl_enabled", False)
             ),
             "safety_cost_aggregation": (
-                "deadline_violation_cost + fuzzy_lateness_cost "
-                "+ process_risk_cost"
+                "delta_risk_weight * positive_delta_risk + "
+                "violation_weight * violation_cost + "
+                "lateness_weight * normalized_lateness"
             ),
             "process_risk_aggregation": (
                 f"{getattr(self, 'safe_rl_process_risk_aggregation', 'mean')}"
@@ -3161,12 +3239,16 @@ class HrlHeftEnv(gym.Env):
         )
         return base
 
-    def get_safety_diagnostics(self) -> dict:
+    def get_safety_diagnostics(
+        self,
+        *,
+        risk_before: float | None = None,
+    ) -> dict:
         """返回本次转换的独立安全代价和可累计诊断指标。
 
         完成代价只对尚未进入 ``_safety_accounted_workflow_ids`` 的工作流结算，
-        因而同一完成事件不会在后续 VM/Manager 转换中重复计费。过程风险是
-        当前状态快照，在每个实际转换上重新计算；多个层级的 cost 不应跨层相加。
+        因而同一完成事件不会在后续 VM/Manager 转换中重复计费。过程风险复用
+        同一套模糊预测定义，但只计动作前后的正增量。
         """
         if not getattr(self, "safe_rl_enabled", False):
             return self._empty_safety_info()
@@ -3180,7 +3262,8 @@ class HrlHeftEnv(gym.Env):
         )
 
         violation_cost = 0.0
-        lateness_cost = 0.0
+        normalized_lateness = 0.0
+        raw_lateness_seconds = 0.0
         workflow_safety = []
         for workflow_id in completed_ids:
             workflow = self.workflows[workflow_id]
@@ -3191,8 +3274,14 @@ class HrlHeftEnv(gym.Env):
                 risk_finish,
                 deadline,
             )
+            normalized = min(
+                max(lateness, 0.0)
+                / self.safe_rl_lateness_normalizer,
+                self.safe_rl_lateness_clip,
+            )
             violation_cost += violation
-            lateness_cost += lateness
+            normalized_lateness += normalized
+            raw_lateness_seconds += lateness
             workflow_safety.append(
                 {
                     "workflow_id": int(workflow_id),
@@ -3204,7 +3293,10 @@ class HrlHeftEnv(gym.Env):
                     "risk_finish_time": float(risk_finish),
                     "fuzzy_safety_margin": float(deadline - risk_finish),
                     "deadline_violation_cost": float(violation),
+                    "violation_cost": float(violation),
                     "fuzzy_lateness_cost": float(lateness),
+                    "normalized_lateness": float(normalized),
+                    "raw_fuzzy_lateness_seconds": float(lateness),
                     "process_risk_cost": 0.0,
                 }
             )
@@ -3218,14 +3310,21 @@ class HrlHeftEnv(gym.Env):
         process_risks = [
             float(row["process_risk_cost"]) for row in unfinished_rows
         ]
-        process_risk_cost = (
-            float(np.mean(process_risks)) if process_risks else 0.0
-        )
+        risk_after = self._mean_process_risk(margin_summary)
+        if risk_before is None:
+            risk_before = risk_after
+        risk_before = float(risk_before)
+        if not np.isfinite(risk_before):
+            raise ValueError("risk_before must be finite")
+        positive_delta_risk = max(0.0, risk_after - risk_before)
         all_rows = workflow_safety + unfinished_rows
         safety_cost = (
-            float(violation_cost)
-            + float(lateness_cost)
-            + float(process_risk_cost)
+            self.safe_rl_delta_risk_weight
+            * float(positive_delta_risk)
+            + self.safe_rl_violation_weight
+            * float(violation_cost)
+            + self.safe_rl_lateness_weight
+            * float(normalized_lateness)
         )
 
         completed_count = len(completed_ids)
@@ -3240,17 +3339,37 @@ class HrlHeftEnv(gym.Env):
         ) + 1
         self._safety_cumulative_deadline_violation_count += violation_count
         self._safety_cumulative_completed_workflow_count += completed_count
-        self._safety_cumulative_fuzzy_lateness_cost += float(lateness_cost)
+        # Compatibility field: despite its historic name, this is raw seconds.
+        self._safety_cumulative_fuzzy_lateness_cost += float(
+            raw_lateness_seconds
+        )
+        self._safety_cumulative_normalized_lateness = float(
+            getattr(
+                self,
+                "_safety_cumulative_normalized_lateness",
+                0.0,
+            )
+        ) + float(
+            normalized_lateness
+        )
         self._safety_cumulative_process_risk_cost += float(
-            process_risk_cost
+            positive_delta_risk
         )
 
         info.update(
             {
                 "safety_cost": float(safety_cost),
+                "positive_delta_risk": float(positive_delta_risk),
+                "normalized_lateness": float(normalized_lateness),
+                "violation_cost": float(violation_cost),
+                "process_risk_before": float(risk_before),
+                "process_risk_after": float(risk_after),
+                "raw_fuzzy_lateness_seconds": float(
+                    raw_lateness_seconds
+                ),
                 "deadline_violation_cost": float(violation_cost),
-                "fuzzy_lateness_cost": float(lateness_cost),
-                "process_risk_cost": float(process_risk_cost),
+                "fuzzy_lateness_cost": float(raw_lateness_seconds),
+                "process_risk_cost": float(positive_delta_risk),
                 "deadline_violation_count": int(violation_count),
                 "completed_workflow_count": int(completed_count),
                 "unfinished_workflow_count": int(len(unfinished_rows)),
@@ -3302,6 +3421,9 @@ class HrlHeftEnv(gym.Env):
                 ),
                 "cumulative_fuzzy_lateness_cost": float(
                     self._safety_cumulative_fuzzy_lateness_cost
+                ),
+                "cumulative_normalized_lateness": float(
+                    self._safety_cumulative_normalized_lateness
                 ),
                 "cumulative_process_risk_cost": float(
                     self._safety_cumulative_process_risk_cost
@@ -5206,6 +5328,11 @@ class HrlHeftEnv(gym.Env):
         delay_norm = _clip01(lateness / max(self.task_baseline_norm, 1e-9))
         r_delay = -float(delay_norm)
 
+        process_risk_before_action = (
+            self._current_mean_process_risk()
+            if self.safe_rl_enabled
+            else 0.0
+        )
         energy_before_action = (
             self.get_fuzzy_energy_summary()
             if self.safe_rl_enabled
@@ -5299,7 +5426,11 @@ class HrlHeftEnv(gym.Env):
                     "performance_reward_definition": "legacy_mixed_reward",
                 }
             )
-        info.update(self.get_safety_diagnostics())
+        info.update(
+            self.get_safety_diagnostics(
+                risk_before=process_risk_before_action
+            )
+        )
         if self.manager_mode == HEURISTIC_SELECTION_MODE:
             self._phase_heuristic_safety_cost += float(
                 info.get("safety_cost", 0.0)
@@ -5317,6 +5448,11 @@ class HrlHeftEnv(gym.Env):
 
     def finish_phase_and_advance(self):
         """结束当前分配阶段、推进仿真时间并计算 Manager 基础奖励"""
+        process_risk_before_advance = (
+            self._current_mean_process_risk()
+            if self.safe_rl_enabled
+            else 0.0
+        )
         if self._phase_assign_cnt == 0 and self._has_decision_point():
             self._fuse_zero_assign_streak += 1
             if self._fuse_zero_assign_streak >= self._fuse_zero_assign_limit:
@@ -5417,7 +5553,11 @@ class HrlHeftEnv(gym.Env):
                     "performance_reward_definition": "legacy_manager_reward",
                 }
             )
-        info.update(self.get_safety_diagnostics())
+        info.update(
+            self.get_safety_diagnostics(
+                risk_before=process_risk_before_advance
+            )
+        )
         phase_heuristic_safety_cost = float(
             getattr(
                 self,
@@ -5646,6 +5786,7 @@ class HrlHeftEnv(gym.Env):
         self._safety_cumulative_deadline_violation_count = 0
         self._safety_cumulative_completed_workflow_count = 0
         self._safety_cumulative_fuzzy_lateness_cost = 0.0
+        self._safety_cumulative_normalized_lateness = 0.0
         self._safety_cumulative_process_risk_cost = 0.0
         self._safe_fuzzy_energy_score = 0.0
         self._phase_heuristic_safety_cost = 0.0

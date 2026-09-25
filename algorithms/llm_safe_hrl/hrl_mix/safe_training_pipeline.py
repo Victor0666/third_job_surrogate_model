@@ -724,14 +724,21 @@ def load_safe_training_plan(path: str | os.PathLike[str]) -> SafeTrainingPlan:
     )
 
 
-def validate_preparation_artifacts(plan: SafeTrainingPlan) -> None:
+def validate_preparation_artifacts(
+    plan: SafeTrainingPlan,
+    *,
+    demonstration_manifest_path: str | None = None,
+) -> None:
     """Fail closed when stage-1 data required by stage 2 is absent."""
     for stage in plan.preparation_stages:
         if (
             stage["stage_type"] == "demonstration_generation"
             and stage["require_completed_artifact"]
         ):
-            manifest = Path(stage["artifact_manifest_path"])
+            manifest = Path(
+                demonstration_manifest_path
+                or stage["artifact_manifest_path"]
+            )
             if not manifest.is_file():
                 raise FileNotFoundError(
                     "stage-1 safe demonstration artifact is missing: "

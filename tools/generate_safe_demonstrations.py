@@ -3,7 +3,8 @@
 Example:
     python -m tools.generate_safe_demonstrations ^
       --manifest out/demonstrations/manifest.json ^
-      --heuristic traditional_edf --generate-split train ^
+      --manager-heuristic-manifest out/topk_heuristic_library_k10.json ^
+      --heuristic seevo_top1 --generate-split train ^
       --train-workflow-seeds 1 --train-resource-seeds 1 ^
       --validation-workflow-seeds 2 --validation-resource-seeds 2 ^
       --final-test-workflow-seeds 3 --final-test-resource-seeds 3
@@ -15,6 +16,7 @@ import argparse
 from pathlib import Path
 
 from base.hrl_env import CloudWorkflowEnv_VMAgents
+from base.heuristic_admission import file_sha256
 from base.safe_demonstration import (
     DemonstrationSafetyStandard,
     StrictSeedSplit,
@@ -72,6 +74,17 @@ def _environment_kwargs(cfg, workflow_seed, resource_seed):
         "safe_rl_process_risk_aggregation": (
             cfg.safe_rl.process_risk_aggregation
         ),
+        "safe_rl_lateness_normalizer": (
+            cfg.safe_rl.lateness_normalizer
+        ),
+        "safe_rl_lateness_clip": cfg.safe_rl.lateness_clip,
+        "safe_rl_delta_risk_weight": (
+            cfg.safe_rl.delta_risk_weight
+        ),
+        "safe_rl_violation_weight": (
+            cfg.safe_rl.violation_weight
+        ),
+        "safe_rl_lateness_weight": cfg.safe_rl.lateness_weight,
         "safe_rl_shield_enabled": True,
         "safe_rl_fallback_controller": (
             cfg.safe_rl.shield.fallback_controller
@@ -86,6 +99,9 @@ def _environment_kwargs(cfg, workflow_seed, resource_seed):
         "manager_mode": "heuristic_selection_mode",
         "manager_heuristic_library_path": (
             cfg.safe_rl.manager_heuristics.library_manifest_path
+        ),
+        "manager_heuristic_llm_only": (
+            cfg.safe_rl.manager_heuristics.llm_only
         ),
         "manager_heuristic_recent_window": (
             cfg.safe_rl.manager_heuristics.recent_window
@@ -107,11 +123,18 @@ def main(argv=None):
     )
     parser.add_argument("--manifest", required=True)
     parser.add_argument(
+        "--manager-heuristic-manifest",
+        required=True,
+        help=(
+            "Existing Top-K LLM heuristic manifest used by the formal "
+            "Safe-HRL Manager; no heuristic is generated here."
+        ),
+    )
+    parser.add_argument(
         "--heuristic",
         required=True,
         help=(
-            "Traditional heuristic ID or an admitted SeEvo "
-            "heuristic ID."
+            "Available LLM heuristic ID from the supplied Top-K manifest."
         ),
     )
     parser.add_argument(
@@ -174,8 +197,15 @@ def main(argv=None):
         safe_rl_shield_enabled=True,
         safe_rl_state_enabled=True,
         safe_rl_heuristic_manager_enabled=True,
+        manager_heuristic_llm_only=True,
+        manager_heuristic_manifest=(
+            args.manager_heuristic_manifest
+        ),
     )
     standard = DemonstrationSafetyStandard()
+    manager_manifest_sha256 = file_sha256(
+        cfg.safe_rl.manager_heuristics.library_manifest_path
+    )
     for workflow_seed, resource_seed in zip(
         workflow_seeds, resource_seeds
     ):
@@ -184,6 +214,18 @@ def main(argv=None):
                 cfg, workflow_seed, resource_seed
             )
         )
+        if any(
+            not (
+                heuristic.is_llm_rule
+                and heuristic.available
+                and heuristic.selected_for_manager
+            )
+            for heuristic in env.manager_heuristics
+        ):
+            raise ValueError(
+                "--manager-heuristic-manifest must be a valid Top-K "
+                "manifest whose LLM rules are available"
+            )
         apply_env_scales(env, cfg)
         episode = generate_safe_demonstration_episode(
             env,
@@ -199,6 +241,13 @@ def main(argv=None):
             Path(args.manifest),
             episode,
             seed_split=seed_split,
+            manager_heuristic_ids=tuple(
+                heuristic.heuristic_id
+                for heuristic in env.manager_heuristics
+            ),
+            manager_heuristic_manifest_sha256=(
+                manager_manifest_sha256
+            ),
         )
         print(
             f"{episode.episode_id}: "

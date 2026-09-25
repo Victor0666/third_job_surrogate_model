@@ -39,7 +39,7 @@ REQUIRED_METHOD_IDS = (
     "original_hrl_plus_llm",
     "safe_hrl_without_llm",
     "llm_augmented_safe_hrl",
-    "llm_safe_hrl_without_curriculum",
+    "llm_safe_hrl_with_curriculum",
     "seevo_best_heuristic_only",
     "edf_baseline",
     "fcfs_fcfs",

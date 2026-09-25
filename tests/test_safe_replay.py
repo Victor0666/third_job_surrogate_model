@@ -19,6 +19,7 @@ try:
     import torch
 
     from base.d3qn_agent import D3QNAgent
+    from hrl_mix.train_utils import warmup_ready
 
     TORCH_AVAILABLE = True
 except ModuleNotFoundError:
@@ -92,7 +93,10 @@ class SafeReplayTransitionTests(unittest.TestCase):
     def test_replay_config_validates_schema_threshold_and_td_weights(self):
         config = SafetyReplayConfig()
         self.assertEqual(config.transition_schema_version, 1)
-        self.assertFalse(config.combined_per_priority)
+        self.assertTrue(config.host_use_per)
+        self.assertTrue(config.vm_use_per)
+        self.assertFalse(config.manager_use_per)
+        self.assertTrue(config.combined_per_priority)
         with self.assertRaises(ValueError):
             SafetyReplayConfig(transition_schema_version=99)
         with self.assertRaises(ValueError):
@@ -459,6 +463,12 @@ class SafeReplayAgentTests(unittest.TestCase):
             agent.last_update_info["per_priority_mode"],
             "combined_performance_safety_td",
         )
+
+    def test_per_list_uses_agent_capacity_for_warmup(self):
+        agent = self._agent(use_per=True, combined=True)
+        self.assertFalse(warmup_ready(agent, 0.25))
+        self._remember(agent)
+        self.assertTrue(warmup_ready(agent, 0.25))
 
 
 if __name__ == "__main__":

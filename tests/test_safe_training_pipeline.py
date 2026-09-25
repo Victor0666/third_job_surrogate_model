@@ -597,6 +597,50 @@ class SafeTrainingPipelineTests(unittest.TestCase):
                 Path(td) / "dataset.json",
             )
 
+    def test_cli_manifest_overrides_pipeline_offline_dataset(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            plan_path = _write_plan(root)
+            cli_manifest = root / "SS_T_manifest.json"
+            with mock.patch(
+                "hrl_mix.train_config.os.makedirs"
+            ):
+                config = build_train_config(
+                    scenario="SS",
+                    ddl="T",
+                    max_episodes=1,
+                    safe_rl_enabled=True,
+                    safe_rl_shield_enabled=True,
+                    safe_rl_state_enabled=True,
+                    safe_rl_dynamic_lambda_enabled=True,
+                    safe_rl_heuristic_manager_enabled=True,
+                    safe_rl_training_pipeline_plan=str(plan_path),
+                    safe_rl_offline_pretrain_manifest=str(
+                        cli_manifest
+                    ),
+                )
+            self.assertEqual(
+                Path(
+                    config.safe_rl.offline_pretraining
+                    .dataset_manifest_path
+                ),
+                cli_manifest,
+            )
+
+    def test_preparation_validation_uses_effective_cli_manifest(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            plan = load_safe_training_plan(_write_plan(root))
+            cli_manifest = root / "SS_M_manifest.json"
+            cli_manifest.write_text("{}", encoding="utf-8")
+            self.assertFalse(
+                Path(plan.demonstration_manifest_path).exists()
+            )
+            validate_preparation_artifacts(
+                plan,
+                demonstration_manifest_path=str(cli_manifest),
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

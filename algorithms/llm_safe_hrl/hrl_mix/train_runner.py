@@ -33,6 +33,7 @@ import numpy as np
 import torch
 
 from base.d3qn_agent import D3QNAgent
+from base.heuristic_admission import file_sha256
 from base.hrl_env import CloudWorkflowEnv_VMAgents
 from base.offline_pretraining import (
     pretrain_agents_from_demonstrations,
@@ -293,17 +294,24 @@ def _update_shared_lagrange_at_episode_end(
     env,
     agents,
 ):
-    """用环境 episode cost 均值更新一次共享 lambda 并同步三层。"""
+    """用 episode 实际工作流 DDL 违反率更新共享 lambda。"""
+    violation_count = int(
+        getattr(
+            env,
+            "_safety_cumulative_deadline_violation_count",
+            0,
+        )
+    )
+    completed_count = int(
+        getattr(
+            env,
+            "_safety_cumulative_completed_workflow_count",
+            0,
+        )
+    )
     diagnostics = controller.observe_episode(
-        episode_safety_cost=float(
-            getattr(env, "_safety_cumulative_cost", 0.0)
-        ),
-        safety_transition_count=int(
-            getattr(
-                env,
-                "_safety_cumulative_transition_count",
-                0,
-            )
+        episode_violation_rate=(
+            violation_count / max(completed_count, 1)
         ),
     )
     synchronize_lagrange_multiplier(controller, agents)
@@ -643,7 +651,7 @@ def train(
     safe_rl_state_enabled: bool = False,
     safe_rl_dynamic_lambda_enabled: bool = False,
     safe_rl_heuristic_manager_enabled: bool = False,
-    manager_heuristic_llm_only: bool = False,
+    manager_heuristic_llm_only: bool | None = None,
     manager_heuristic_manifest: str | None = None,
     llm_run_manifest: str | None = None,
     safe_rl_offline_pretrain_manifest: str | None = None,
@@ -653,7 +661,7 @@ def train(
     safe_rl_offline_pretrain_q_c: bool = True,
     safe_rl_training_pipeline_plan: str | None = None,
     safe_rl_training_resume_checkpoint: str | None = None,
-    safe_rl_curriculum_enabled: bool = True,
+    safe_rl_curriculum_enabled: bool = False,
     optimizer_seed: int = 0,
     deadline_cache_override: str | None = None,
     deadline_cache_paths: dict[str, str] | None = None,
@@ -661,6 +669,7 @@ def train(
     source_scenario: str | None = None,
     resource_scale: str | None = None,
     validation_workers: int = 3,
+    safe_rl_lambda_lr: float = 0.05,
 ):
     """执行一次完整训练
 
@@ -683,6 +692,7 @@ def train(
         safe_rl_dynamic_lambda_enabled=(
             safe_rl_dynamic_lambda_enabled
         ),
+        safe_rl_lambda_lr=safe_rl_lambda_lr,
         safe_rl_heuristic_manager_enabled=(
             safe_rl_heuristic_manager_enabled
         ),
@@ -766,7 +776,13 @@ def train(
                     "instead of resuming training"
                 )
         else:
-            validate_preparation_artifacts(training_plan)
+            validate_preparation_artifacts(
+                training_plan,
+                demonstration_manifest_path=(
+                    cfg.safe_rl.offline_pretraining
+                    .dataset_manifest_path
+                ),
+            )
         stage_metrics_logger = SafeStageMetricsLogger(
             training_plan.metrics_path
         )
@@ -832,6 +848,17 @@ def train(
         safe_rl_process_risk_aggregation=(
             cfg.safe_rl.process_risk_aggregation
         ),
+        safe_rl_lateness_normalizer=(
+            cfg.safe_rl.lateness_normalizer
+        ),
+        safe_rl_lateness_clip=cfg.safe_rl.lateness_clip,
+        safe_rl_delta_risk_weight=(
+            cfg.safe_rl.delta_risk_weight
+        ),
+        safe_rl_violation_weight=(
+            cfg.safe_rl.violation_weight
+        ),
+        safe_rl_lateness_weight=cfg.safe_rl.lateness_weight,
         safe_rl_shield_enabled=cfg.safe_rl.shield.enabled,
         safe_rl_fallback_controller=(
             cfg.safe_rl.shield.fallback_controller
@@ -942,12 +969,11 @@ def train(
     print(
         f"[safe rl lagrange stage8] enabled="
         f"{lagrange_controller.enabled} sharing=global_three_layer "
-        f"period=episode_ema lr={lagrange_cfg.lambda_lr:.6g} "
+        f"period=episode_violation_rate lr={lagrange_cfg.lambda_lr:.6g} "
         f"bounds=[{lagrange_cfg.lambda_min:.3f},"
         f"{lagrange_cfg.lambda_max:.3f}] "
         f"cost_budget={lagrange_cfg.cost_budget:.6g} "
         f"interval={lagrange_cfg.update_interval}episodes "
-        f"ema_factor={lagrange_cfg.cost_ema_factor:.3f} "
         f"warmup={lagrange_cfg.warmup_steps}episodes"
     )
     print(
@@ -957,6 +983,8 @@ def train(
         f"{cfg.safe_rl.replay.near_boundary_margin:.6g}s "
         f"combined_per_priority="
         f"{cfg.safe_rl.replay.combined_per_priority} "
+        f"use_per=(host={cfg.safe_rl.replay.host_use_per},"
+        f"vm={cfg.safe_rl.replay.vm_use_per},manager=False) "
         f"td_weights=("
         f"{cfg.safe_rl.replay.performance_td_weight:.3f},"
         f"{cfg.safe_rl.replay.safety_td_weight:.3f})"
@@ -966,6 +994,7 @@ def train(
         f"{cfg.safe_rl.manager_heuristics.mode} "
         f"manifest="
         f"{cfg.safe_rl.manager_heuristics.library_manifest_path} "
+        f"llm_only={cfg.safe_rl.manager_heuristics.llm_only} "
         f"recent_window="
         f"{cfg.safe_rl.manager_heuristics.recent_window}"
     )
@@ -1015,6 +1044,10 @@ def train(
         grad_clip=cfg.vm_agent.grad_clip,
         hidden_dims=cfg.vm_agent.hidden_dims,
         device=device,
+        use_per=bool(
+            cfg.safe_rl.enabled
+            and cfg.safe_rl.replay.vm_use_per
+        ),
         observation_schema_version=vm_observation_schema_version,
         safe_rl_enabled=cfg.safe_rl.enabled,
         safety_discount=cfg.safe_rl.safety_discount,
@@ -1052,6 +1085,10 @@ def train(
         grad_clip=cfg.host_agent.grad_clip,
         hidden_dims=cfg.host_agent.hidden_dims,
         device=device,
+        use_per=bool(
+            cfg.safe_rl.enabled
+            and cfg.safe_rl.replay.host_use_per
+        ),
         observation_schema_version=host_observation_schema_version,
         safe_rl_enabled=cfg.safe_rl.enabled,
         safety_discount=cfg.safe_rl.safety_discount,
@@ -1091,6 +1128,10 @@ def train(
         grad_clip=cfg.manager_agent.grad_clip,
         hidden_dims=cfg.manager_agent.hidden_dims,
         device=device,
+        use_per=bool(
+            cfg.safe_rl.enabled
+            and cfg.safe_rl.replay.manager_use_per
+        ),
         observation_schema_version=(
             manager_observation_schema_version
         ),
@@ -1105,7 +1146,7 @@ def train(
             cfg.safe_rl.replay.near_boundary_margin
         ),
         safe_per_combined_priority=(
-            cfg.safe_rl.replay.combined_per_priority
+            False
         ),
         safe_per_performance_td_weight=(
             cfg.safe_rl.replay.performance_td_weight
@@ -1135,9 +1176,33 @@ def train(
     # 离线初始化发生在在线循环之前。该入口不调用 D3QNAgent.update，
     # 因而不推进 replay/PER、epsilon、online update 计数或 target 周期。
     if training_resume_payload is None:
+        pretraining_identity = {}
+        if (
+            cfg.safe_rl.offline_pretraining.enabled
+            and cfg.safe_rl.manager_heuristics.llm_only
+        ):
+            manager_manifest = (
+                cfg.safe_rl.manager_heuristics
+                .library_manifest_path
+            )
+            pretraining_identity = {
+                "manager_heuristic_ids": tuple(
+                    heuristic.heuristic_id
+                    for heuristic in env.manager_heuristics
+                ),
+                "manager_heuristic_manifest_sha256": (
+                    file_sha256(manager_manifest)
+                ),
+            }
+            print(
+                "[safe demonstration pretraining] "
+                "effective_manifest="
+                f"{cfg.safe_rl.offline_pretraining.dataset_manifest_path}"
+            )
         pretraining_report = pretrain_agents_from_demonstrations(
             agents_by_layer,
             cfg.safe_rl.offline_pretraining,
+            **pretraining_identity,
         )
     else:
         # 恢复阶段化 checkpoint 时不得再次执行阶段 2，否则会覆盖已在线
@@ -1171,6 +1236,8 @@ def train(
             f"{pretraining_report['train_episode_count']} "
             f"validation_episodes="
             f"{pretraining_report['validation_episode_count']} "
+            f"dataset_manifest="
+            f"{pretraining_report['dataset_manifest_path']} "
             f"report={pretraining_report_path}"
         )
 
@@ -1204,6 +1271,10 @@ def train(
             "communication_reward",
             "total_performance_reward",
             "safety_cost",
+            "positive_delta_risk",
+            "normalized_lateness",
+            "raw_fuzzy_lateness_seconds",
+            "violation_cost",
             "deadline_violation_cost",
             "fuzzy_lateness_cost",
             "process_risk_cost",
@@ -1244,6 +1315,10 @@ def train(
             "mean_safety_cost",
             "cost_budget",
             "constraint_gap",
+            "episode_violation_rate",
+            "lambda_before",
+            "lambda_after",
+            "lagrange_gap",
             "lambda_update_count",
             "eval_deadline_violation_rate",
             "eval_zero_violation_pass",
@@ -1714,6 +1789,34 @@ def train(
                 safety_cost=float(
                     getattr(env, "_safety_cumulative_cost", 0.0)
                 ),
+                positive_delta_risk=float(
+                    getattr(
+                        env,
+                        "_safety_cumulative_process_risk_cost",
+                        0.0,
+                    )
+                ),
+                normalized_lateness=float(
+                    getattr(
+                        env,
+                        "_safety_cumulative_normalized_lateness",
+                        0.0,
+                    )
+                ),
+                raw_fuzzy_lateness_seconds=float(
+                    getattr(
+                        env,
+                        "_safety_cumulative_fuzzy_lateness_cost",
+                        0.0,
+                    )
+                ),
+                violation_cost=float(
+                    getattr(
+                        env,
+                        "_safety_cumulative_deadline_violation_count",
+                        0,
+                    )
+                ),
                 deadline_violation_cost=float(
                     getattr(
                         env,
@@ -1818,6 +1921,20 @@ def train(
                 constraint_gap=float(
                     lagrange_diagnostics["constraint_gap"]
                 ),
+                episode_violation_rate=float(
+                    lagrange_diagnostics[
+                        "episode_violation_rate"
+                    ]
+                ),
+                lambda_before=float(
+                    lagrange_diagnostics["lambda_before"]
+                ),
+                lambda_after=float(
+                    lagrange_diagnostics["lambda_after"]
+                ),
+                lagrange_gap=float(
+                    lagrange_diagnostics["lagrange_gap"]
+                ),
                 lambda_update_count=int(
                     lagrange_diagnostics[
                         "lambda_update_count"
@@ -1863,8 +1980,8 @@ def train(
                 f"{training_plan.seed_split.validation if training_plan is not None else cfg.eval_seeds}) | "
                 f"wf={getattr(env,'completed_workflows',0)}/{getattr(env,'workflows_per_episode','unknown')} | "
                 f"lambda={lagrange_diagnostics['current_lambda']:.6f} "
-                f"Jc_ema={lagrange_diagnostics['mean_safety_cost']:.6f} "
-                f"gap={lagrange_diagnostics['constraint_gap']:.6f} "
+                f"episode_vio_rate={lagrange_diagnostics['episode_violation_rate']:.6f} "
+                f"gap={lagrange_diagnostics['lagrange_gap']:.6f} "
                 f"lambda_updates={lagrange_diagnostics['lambda_update_count']} | "
                 f"eval_vio_rate={eval_safety['deadline_violation_rate']:.6f} "
                 f"max_fuzzy_late={eval_safety['max_fuzzy_lateness']:.6f} "
@@ -2134,6 +2251,10 @@ def train(
         phase_host_rewards = []
         phase_safety = {
             "safety_cost": 0.0,
+            "positive_delta_risk": 0.0,
+            "normalized_lateness": 0.0,
+            "raw_fuzzy_lateness_seconds": 0.0,
+            "violation_cost": 0.0,
             "deadline_violation_cost": 0.0,
             "fuzzy_lateness_cost": 0.0,
             "process_risk_cost": 0.0,
@@ -2258,6 +2379,10 @@ def train(
             if cfg.safe_rl.enabled:
                 for key in (
                     "safety_cost",
+                    "positive_delta_risk",
+                    "normalized_lateness",
+                    "raw_fuzzy_lateness_seconds",
+                    "violation_cost",
                     "deadline_violation_cost",
                     "fuzzy_lateness_cost",
                     "process_risk_cost",
@@ -2435,6 +2560,10 @@ def train(
         if cfg.safe_rl.enabled:
             for key in (
                 "safety_cost",
+                "positive_delta_risk",
+                "normalized_lateness",
+                "raw_fuzzy_lateness_seconds",
+                "violation_cost",
                 "deadline_violation_cost",
                 "fuzzy_lateness_cost",
                 "process_risk_cost",
@@ -2540,6 +2669,18 @@ def train(
                 )
             ),
             safety_cost=float(phase_safety["safety_cost"]),
+            positive_delta_risk=float(
+                phase_safety["positive_delta_risk"]
+            ),
+            normalized_lateness=float(
+                phase_safety["normalized_lateness"]
+            ),
+            raw_fuzzy_lateness_seconds=float(
+                phase_safety["raw_fuzzy_lateness_seconds"]
+            ),
+            violation_cost=float(
+                phase_safety["violation_cost"]
+            ),
             deadline_violation_cost=float(
                 phase_safety["deadline_violation_cost"]
             ),
@@ -2644,6 +2785,18 @@ def train(
             ),
             constraint_gap=float(
                 lagrange_controller.constraint_gap
+            ),
+            episode_violation_rate=float(
+                lagrange_controller.episode_violation_rate
+            ),
+            lambda_before=float(
+                lagrange_controller.lambda_before
+            ),
+            lambda_after=float(
+                lagrange_controller.lambda_after
+            ),
+            lagrange_gap=float(
+                lagrange_controller.lagrange_gap
             ),
             lambda_update_count=int(
                 lagrange_controller.lambda_update_count

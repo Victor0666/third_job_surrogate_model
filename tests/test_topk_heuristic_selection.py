@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 from algorithms.llm_safe_hrl.LLM.export_topk import (
     _build_record,
@@ -26,6 +28,8 @@ from algorithms.llm_safe_hrl.base.topk_schema import (
 from algorithms.llm_safe_hrl.scenario_registry import (
     resolve_experiment_protocol,
 )
+from hrl_mix.train_config import build_train_config
+from tools.generate_safe_demonstrations import _environment_kwargs
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -191,6 +195,95 @@ def _write_topk_library(directory: Path) -> Path:
 
 
 class ParameterizedTopKTests(unittest.TestCase):
+    def test_demo_and_formal_manager_share_llm_only_action_dim(self):
+        with tempfile.TemporaryDirectory(
+            dir=PROJECT_ROOT
+        ) as raw_directory:
+            manifest = _write_topk_library(Path(raw_directory))
+            with mock.patch("hrl_mix.train_config.os.makedirs"):
+                demo = build_train_config(
+                    scenario="SS",
+                    ddl="T",
+                    max_episodes=1,
+                    safe_rl_enabled=True,
+                    safe_rl_shield_enabled=True,
+                    safe_rl_state_enabled=True,
+                    safe_rl_heuristic_manager_enabled=True,
+                    manager_heuristic_llm_only=True,
+                    manager_heuristic_manifest=str(manifest),
+                )
+                formal = build_train_config(
+                    protocol="single",
+                    source_scenario="SS",
+                    ddl="T",
+                    max_episodes=1,
+                    safe_rl_enabled=True,
+                    safe_rl_shield_enabled=True,
+                    safe_rl_state_enabled=True,
+                    safe_rl_heuristic_manager_enabled=True,
+                    manager_heuristic_manifest=str(manifest),
+                )
+
+            demo_kwargs = _environment_kwargs(demo, 1, 1)
+            demo_actions = load_manager_heuristic_library(
+                manifest,
+                include_traditional=not demo_kwargs[
+                    "manager_heuristic_llm_only"
+                ],
+            )
+            formal_actions = load_manager_heuristic_library(
+                manifest,
+                include_traditional=not (
+                    formal.safe_rl.manager_heuristics.llm_only
+                ),
+            )
+
+        self.assertTrue(demo_kwargs["manager_heuristic_llm_only"])
+        self.assertEqual(len(demo_actions), len(formal_actions))
+        self.assertTrue(all(action.is_llm_rule for action in demo_actions))
+        self.assertTrue(all(action.available for action in demo_actions))
+        self.assertFalse(formal.curriculum_enabled)
+        self.assertEqual(formal.safe_rl.safety_discount, 0.99)
+        self.assertTrue(formal.safe_rl.replay.host_use_per)
+        self.assertTrue(formal.safe_rl.replay.vm_use_per)
+        self.assertFalse(formal.safe_rl.replay.manager_use_per)
+
+    def test_demo_environment_kwargs_forward_qc_config(self):
+        with tempfile.TemporaryDirectory(
+            dir=PROJECT_ROOT
+        ) as raw_directory:
+            manifest = _write_topk_library(Path(raw_directory))
+            with mock.patch("hrl_mix.train_config.os.makedirs"):
+                config = build_train_config(
+                    scenario="SS",
+                    ddl="T",
+                    max_episodes=1,
+                    safe_rl_enabled=True,
+                    safe_rl_shield_enabled=True,
+                    safe_rl_state_enabled=True,
+                    safe_rl_heuristic_manager_enabled=True,
+                    manager_heuristic_llm_only=True,
+                    manager_heuristic_manifest=str(manifest),
+                )
+            config = replace(
+                config,
+                safe_rl=replace(
+                    config.safe_rl,
+                    lateness_normalizer=600.0,
+                    lateness_clip=3.0,
+                    delta_risk_weight=0.8,
+                    violation_weight=1.2,
+                    lateness_weight=0.7,
+                ),
+            )
+            kwargs = _environment_kwargs(config, 1, 1)
+
+        self.assertEqual(kwargs["safe_rl_lateness_normalizer"], 600.0)
+        self.assertEqual(kwargs["safe_rl_lateness_clip"], 3.0)
+        self.assertEqual(kwargs["safe_rl_delta_risk_weight"], 0.8)
+        self.assertEqual(kwargs["safe_rl_violation_weight"], 1.2)
+        self.assertEqual(kwargs["safe_rl_lateness_weight"], 0.7)
+
     def test_all_nine_single_conditions_are_derived_from_arguments(self):
         with tempfile.TemporaryDirectory(
             dir=PROJECT_ROOT

@@ -133,18 +133,18 @@ class SafetyStateConfig:
 
 @dataclass(frozen=True)
 class LagrangianSafetyConfig:
-    """阶段 8 episode/EMA 动态拉格朗日配置，默认关闭。"""
+    """阶段 8 episode 违反率动态拉格朗日配置，默认关闭。"""
 
     enabled: bool = False
     lambda_init: float = 1.0
-    lambda_lr: float = 0.01
+    lambda_lr: float = 0.05
     lambda_min: float = 0.0
     lambda_max: float = 100.0
-    cost_budget: float = 0.0
+    cost_budget: float = 0.01
     update_interval: int = 1
     cost_ema_factor: float = 0.9
     # 单位是已经完成并观测的 episode 数，不是 transition/global step。
-    warmup_steps: int = 5
+    warmup_steps: int = 0
 
 
 @dataclass(frozen=True)
@@ -153,7 +153,10 @@ class SafetyReplayConfig:
 
     transition_schema_version: int = 1
     near_boundary_margin: float = 1.0
-    combined_per_priority: bool = False
+    host_use_per: bool = True
+    vm_use_per: bool = True
+    manager_use_per: bool = False
+    combined_per_priority: bool = True
     performance_td_weight: float = 1.0
     safety_td_weight: float = 1.0
 
@@ -195,9 +198,15 @@ class SafeManagerHeuristicConfig:
     mode: str = "legacy_rule_weight_mode"
     library_manifest_path: str | None = None
     recent_window: int = 20
-    llm_only: bool = False
+    llm_only: bool | None = None
 
     def __post_init__(self) -> None:
+        if self.llm_only is None:
+            object.__setattr__(
+                self,
+                "llm_only",
+                self.mode == "heuristic_selection_mode",
+            )
         if self.mode not in {
             "legacy_rule_weight_mode",
             "heuristic_selection_mode",
@@ -374,13 +383,18 @@ class SafeRLConfig:
     """安全强化学习分阶段配置；默认不启用安全训练语义。"""
 
     enabled: bool = False
-    safety_discount: float = 0.95
+    safety_discount: float = 0.99
     safety_learning_rate: float = 3e-4
     safety_loss_weight: float = 1.0
     initial_lagrange_multiplier: float = 1.0
     fuzzy_energy_uncertainty_weight: float = 1.0
     fuzzy_deadline_eta: float = 0.95
     process_risk_aggregation: str = "mean"
+    lateness_normalizer: float = 300.0
+    lateness_clip: float = 5.0
+    delta_risk_weight: float = 0.5
+    violation_weight: float = 1.0
+    lateness_weight: float = 1.0
     shield: SafetyShieldConfig = field(
         default_factory=SafetyShieldConfig
     )
@@ -408,6 +422,25 @@ class SafeRLConfig:
     metrics: SafeMetricsConfig = field(
         default_factory=SafeMetricsConfig
     )
+
+    def __post_init__(self) -> None:
+        if (
+            not math.isfinite(self.lateness_normalizer)
+            or self.lateness_normalizer <= 0.0
+        ):
+            raise ValueError(
+                "lateness_normalizer must be finite and positive"
+            )
+        for name, value in (
+            ("lateness_clip", self.lateness_clip),
+            ("delta_risk_weight", self.delta_risk_weight),
+            ("violation_weight", self.violation_weight),
+            ("lateness_weight", self.lateness_weight),
+        ):
+            if not math.isfinite(value) or value < 0.0:
+                raise ValueError(
+                    f"{name} must be finite and non-negative"
+                )
 
 
 @dataclass(frozen=True)
@@ -695,7 +728,7 @@ def build_train_config(
     safe_rl_state_enabled: bool = False,
     safe_rl_dynamic_lambda_enabled: bool = False,
     safe_rl_heuristic_manager_enabled: bool = False,
-    manager_heuristic_llm_only: bool = False,
+    manager_heuristic_llm_only: bool | None = None,
     manager_heuristic_manifest: str | None = None,
     llm_run_manifest: str | None = None,
     safe_rl_offline_pretrain_manifest: str | None = None,
@@ -705,7 +738,7 @@ def build_train_config(
     safe_rl_offline_pretrain_q_c: bool = True,
     safe_rl_training_pipeline_plan: str | None = None,
     safe_rl_training_resume_checkpoint: str | None = None,
-    safe_rl_curriculum_enabled: bool = True,
+    safe_rl_curriculum_enabled: bool = False,
     optimizer_seed: int = 0,
     protocol: str | None = None,
     source_scenario: str | None = None,
@@ -713,6 +746,7 @@ def build_train_config(
     require_deadline_cache: bool = True,
     deadline_cache_override: str | Path | None = None,
     deadline_cache_paths: Mapping[str, str] | None = None,
+    safe_rl_lambda_lr: float = 0.05,
 ) -> TrainConfig:
     """根据命令行参数构造完整训练配置。
 
@@ -724,6 +758,11 @@ def build_train_config(
     返回：
     - TrainConfig：训练主循环所需的全部配置。
     """
+    if manager_heuristic_llm_only is None:
+        manager_heuristic_llm_only = bool(
+            safe_rl_heuristic_manager_enabled
+            and protocol is not None
+        )
     if safe_rl_shield_enabled and not safe_rl_enabled:
         raise ValueError(
             "safe_rl_shield_enabled=True requires "
@@ -788,16 +827,8 @@ def build_train_config(
         pipeline_manifest = str(
             pipeline_offline["dataset_manifest_path"]
         )
-        if (
-            safe_rl_offline_pretrain_manifest
-            and Path(safe_rl_offline_pretrain_manifest).resolve()
-            != Path(pipeline_manifest).resolve()
-        ):
-            raise ValueError(
-                "offline pretraining manifest conflicts with the "
-                "stage-2 manifest in the safe training plan"
-            )
-        safe_rl_offline_pretrain_manifest = pipeline_manifest
+        if safe_rl_offline_pretrain_manifest is None:
+            safe_rl_offline_pretrain_manifest = pipeline_manifest
         for name, enabled in (
             ("safe_rl_enabled", safe_rl_enabled),
             ("safe_rl_shield_enabled", safe_rl_shield_enabled),
@@ -1026,6 +1057,10 @@ def build_train_config(
             "curriculum_enabled": bool(safe_rl_curriculum_enabled),
             "optimizer_seed": int(optimizer_seed),
         }
+        if safe_rl_dynamic_lambda_enabled:
+            safe_name_payload["lambda_lr"] = float(
+                safe_rl_lambda_lr
+            )
         if manager_heuristic_llm_only:
             # 只在开启时才写入这一项：run_name 是整个 payload 的摘要，无条件新增
             # 键会改变所有既有 safe_rl 运行的目录名。开/关两种配置仍然互不相同，
@@ -1043,7 +1078,9 @@ def build_train_config(
             pipeline_plan.plan_hash + (
                 ":curriculum" if safe_rl_curriculum_enabled
                 else ":without_curriculum"
-            ) + f":optimizer_seed={int(optimizer_seed)}",
+            )
+            + f":optimizer_seed={int(optimizer_seed)}"
+            + f":lambda_lr={float(safe_rl_lambda_lr):.17g}",
         )
     if protocol_context is None:
         output_paths = training_output_paths(ROOT_DIR, run_name)
@@ -1136,13 +1173,18 @@ def build_train_config(
         deadline_cache_paths=normalized_cache_paths,
         safe_rl=SafeRLConfig(
             enabled=bool(safe_rl_enabled),
-            safety_discount=0.95,
+            safety_discount=0.99,
             safety_learning_rate=3e-4,
             safety_loss_weight=1.0,
             initial_lagrange_multiplier=1.0,
             fuzzy_energy_uncertainty_weight=1.0,
             fuzzy_deadline_eta=0.95,
             process_risk_aggregation="mean",
+            lateness_normalizer=300.0,
+            lateness_clip=5.0,
+            delta_risk_weight=0.5,
+            violation_weight=1.0,
+            lateness_weight=1.0,
             shield=SafetyShieldConfig(
                 enabled=bool(safe_rl_shield_enabled),
                 fallback_controller="fixed_vm_rule",
@@ -1155,18 +1197,21 @@ def build_train_config(
             lagrangian=LagrangianSafetyConfig(
                 enabled=bool(safe_rl_dynamic_lambda_enabled),
                 lambda_init=1.0,
-                lambda_lr=0.01,
+                lambda_lr=float(safe_rl_lambda_lr),
                 lambda_min=0.0,
                 lambda_max=100.0,
-                cost_budget=0.0,
+                cost_budget=0.01,
                 update_interval=1,
                 cost_ema_factor=0.9,
-                warmup_steps=5,
+                warmup_steps=0,
             ),
             replay=SafetyReplayConfig(
                 transition_schema_version=1,
                 near_boundary_margin=1.0,
-                combined_per_priority=False,
+                host_use_per=True,
+                vm_use_per=True,
+                manager_use_per=False,
+                combined_per_priority=True,
                 performance_td_weight=1.0,
                 safety_td_weight=1.0,
             ),

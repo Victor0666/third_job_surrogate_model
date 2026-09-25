@@ -127,6 +127,28 @@ class ExperimentMatrixTests(unittest.TestCase):
         for artifact in manifest["artifact_integrity"]:
             self.assertEqual(len(artifact["sha256"]), 64)
 
+    def test_formal_llm_method_and_curriculum_ablation_are_distinct(self):
+        matrix = load_experiment_matrix(CONFIG)
+        formal = matrix["methods"]["llm_augmented_safe_hrl"]
+        curriculum = matrix["methods"][
+            "llm_safe_hrl_with_curriculum"
+        ]
+
+        for method in (formal, curriculum):
+            candidates = method["components"][
+                "heuristic_candidate_set"
+            ]
+            self.assertEqual(candidates, "admitted_topk_llm_only")
+            for traditional in ("FCFS", "SJF", "MCF", "HUR", "EDF"):
+                self.assertNotIn(traditional, candidates)
+
+        self.assertFalse(
+            formal["runtime_overrides"]["curriculum_enabled"]
+        )
+        self.assertTrue(
+            curriculum["runtime_overrides"]["curriculum_enabled"]
+        )
+
     def test_case_fixtures_are_deterministic_and_splits_disjoint(self):
         first = build_experiment_manifest(CONFIG)
         second = build_experiment_manifest(CONFIG)

@@ -206,6 +206,21 @@ def build_frozen_scenario_env_kwargs(
         "safe_rl_process_risk_aggregation": str(
             _required(safe, "process_risk_aggregation", "checkpoint safe_rl config")
         ),
+        "safe_rl_lateness_normalizer": float(
+            safe.get("lateness_normalizer", 300.0)
+        ),
+        "safe_rl_lateness_clip": float(
+            safe.get("lateness_clip", 5.0)
+        ),
+        "safe_rl_delta_risk_weight": float(
+            safe.get("delta_risk_weight", 0.5)
+        ),
+        "safe_rl_violation_weight": float(
+            safe.get("violation_weight", 1.0)
+        ),
+        "safe_rl_lateness_weight": float(
+            safe.get("lateness_weight", 1.0)
+        ),
         "safe_rl_shield_enabled": bool(
             _required(shield, "enabled", "checkpoint shield config")
         ),
@@ -223,6 +238,9 @@ def build_frozen_scenario_env_kwargs(
         ),
         "manager_mode": "heuristic_selection_mode",
         "manager_heuristic_library_path": str(Path(library_path).resolve()),
+        "manager_heuristic_llm_only": bool(
+            manager.get("llm_only", False)
+        ),
         "experiment_protocol_identity": context.identity(),
         "manager_heuristic_recent_window": int(
             _required(manager, "recent_window", "checkpoint manager config")
@@ -288,8 +306,13 @@ def _load_frozen_agent(
         input_dim=input_dim,
         output_dim=output_dim,
         hidden_dims=tuple(payload.get("hidden_dims") or (512, 256)),
-        head_hidden_dims=tuple(payload.get("head_hidden_dims") or ()),
+        head_hidden_dims=(
+            tuple(payload["head_hidden_dims"])
+            if payload.get("head_hidden_dims") is not None
+            else None
+        ),
         device=device,
+        use_per=bool(payload.get("use_per", False)),
         buffer_size=max(1, int(replay_metadata.get("capacity", 1))),
         observation_schema_version=str(
             _required(payload, "observation_schema_version", "agent checkpoint")
@@ -427,6 +450,7 @@ def run_frozen_protocol_evaluation(
     source_scenario: str | None = "SS",
     resource_scale: str | None = None,
     checkpoint_manifest: str | os.PathLike[str] | None = None,
+    heuristic_library: str | os.PathLike[str] | None = None,
     test_seeds: Sequence[int] = DEFAULT_FINAL_TEST_SEEDS,
     device: str = "cpu",
     deadline_cache_overrides: Mapping[str, str] | None = None,
@@ -453,16 +477,12 @@ def run_frozen_protocol_evaluation(
         source,
         expected_protocol_identity=identity,
     )
-    library_path = context.library_path.resolve()
-    if not library_path.is_file():
-        raise FileNotFoundError(
-            f"protocol heuristic library not found: {library_path}"
-        )
     library_version = _required(
         manifest,
         "heuristic_library_version",
         "checkpoint manifest",
     )
+
     expected_library_hash = str(
         _required(
             library_version,
@@ -470,11 +490,34 @@ def run_frozen_protocol_evaluation(
             "checkpoint heuristic library",
         )
     )
+
+    recorded_library = str(
+        library_version.get("manifest_path") or ""
+    ).strip()
+
+    selected_library = (
+        heuristic_library
+        or recorded_library
+        or context.library_path
+    )
+
+    library_path = Path(selected_library).expanduser().resolve()
+
+    if not library_path.is_file():
+        raise FileNotFoundError(
+            "protocol heuristic library not found: "
+            f"{library_path}. Restore the training artifact or pass "
+            "--heuristic-library with its current location."
+        )
+
     actual_library_hash = _sha256_file(library_path)
     if actual_library_hash != expected_library_hash:
         raise ValueError(
-            "protocol heuristic library hash differs from the frozen checkpoint"
+            "protocol heuristic library hash differs from the frozen "
+            f"checkpoint: expected={expected_library_hash}, "
+            f"actual={actual_library_hash}, path={library_path}"
         )
+
     # The production loader verifies the protocol identity on the manifest and
     # every admitted LLM rule before any test environment is created.
     load_manager_heuristic_library(
@@ -583,6 +626,17 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--resource-scale", choices=("S", "M", "L"), default=None)
     parser.add_argument("--checkpoint-manifest", default=None)
     parser.add_argument(
+        "--heuristic-library",
+        default=None,
+        help=(
+            "Exact heuristic library used to train the checkpoint. "
+            "Defaults to heuristic_library_version.manifest_path "
+            "recorded in the checkpoint manifest."
+        ),
+    )
+
+
+    parser.add_argument(
         "--deadline-cache",
         action="append",
         default=None,
@@ -613,6 +667,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         source_scenario=source,
         resource_scale=args.resource_scale,
         checkpoint_manifest=args.checkpoint_manifest,
+        heuristic_library=args.heuristic_library,
         test_seeds=args.test_seeds,
         device=args.device,
         deadline_cache_overrides=deadline_cache_overrides,

@@ -53,6 +53,78 @@ def _file_sha256(path: str | Path) -> str:
     return digest.hexdigest()
 
 
+def _manager_heuristic_identity(
+    heuristic_ids: Sequence[str] | None,
+    manifest_sha256: str | None,
+) -> tuple[tuple[str, ...], str] | None:
+    if heuristic_ids is None and manifest_sha256 is None:
+        return None
+    if heuristic_ids is None or manifest_sha256 is None:
+        raise ValueError(
+            "Manager heuristic IDs and manifest hash must be "
+            "provided together"
+        )
+    normalized_ids = tuple(
+        str(heuristic_id).strip()
+        for heuristic_id in heuristic_ids
+    )
+    if not normalized_ids or any(not value for value in normalized_ids):
+        raise ValueError("Manager heuristic IDs must not be empty")
+    if len(set(normalized_ids)) != len(normalized_ids):
+        raise ValueError("Manager heuristic IDs must be unique")
+    normalized_hash = str(manifest_sha256).strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", normalized_hash):
+        raise ValueError(
+            "Manager heuristic manifest hash must be a SHA256 digest"
+        )
+    return normalized_ids, normalized_hash
+
+
+def _validate_manager_heuristic_identity(
+    manifest: Mapping,
+    expected_heuristic_ids: Sequence[str] | None,
+    expected_manifest_sha256: str | None,
+) -> None:
+    expected = _manager_heuristic_identity(
+        expected_heuristic_ids,
+        expected_manifest_sha256,
+    )
+    if expected is None:
+        return
+    if (
+        "manager_heuristic_ids" not in manifest
+        or "manager_heuristic_manifest_sha256" not in manifest
+    ):
+        raise ValueError(
+            "demonstration manifest is missing Manager heuristic "
+            "identity; regenerate the demonstration"
+        )
+    stored = _manager_heuristic_identity(
+        manifest.get("manager_heuristic_ids"),
+        manifest.get("manager_heuristic_manifest_sha256"),
+    )
+    stored_ids, stored_hash = stored
+    expected_ids, expected_hash = expected
+    if stored_ids != expected_ids:
+        if (
+            len(stored_ids) == len(expected_ids)
+            and set(stored_ids) == set(expected_ids)
+        ):
+            raise ValueError(
+                "Manager heuristic order mismatch between "
+                "demonstration and current training"
+            )
+        raise ValueError(
+            "Manager heuristic IDs mismatch between demonstration "
+            "and current training"
+        )
+    if stored_hash != expected_hash:
+        raise ValueError(
+            "Manager heuristic manifest hash mismatch between "
+            "demonstration and current training"
+        )
+
+
 def _finite(value, name: str) -> float:
     result = float(value)
     if not math.isfinite(result):
@@ -659,6 +731,8 @@ def append_demonstration_episode(
     seed_split: StrictSeedSplit,
     dataset_id: str = "safe_hrl_demonstrations",
     dataset_version: str = "2026-07-28.stage13.v1",
+    manager_heuristic_ids: Sequence[str] | None = None,
+    manager_heuristic_manifest_sha256: str | None = None,
 ) -> dict:
     """原子写入 episode 并追加 manifest；不覆盖已有 ID。"""
     path = Path(manifest_path).resolve()
@@ -670,6 +744,10 @@ def append_demonstration_episode(
         raise ValueError(
             "episode split does not match strict seed split"
         )
+    manager_identity = _manager_heuristic_identity(
+        manager_heuristic_ids,
+        manager_heuristic_manifest_sha256,
+    )
     if path.exists():
         manifest = json.loads(path.read_text(encoding="utf-8"))
         if (
@@ -705,6 +783,20 @@ def append_demonstration_episode(
             raise ValueError(
                 "demonstration safety standard cannot change in place"
             )
+        if manager_identity is not None or (
+            "manager_heuristic_ids" in manifest
+            or "manager_heuristic_manifest_sha256" in manifest
+        ):
+            if manager_identity is None:
+                raise ValueError(
+                    "Manager heuristic identity cannot be omitted from "
+                    "an existing demonstration dataset"
+                )
+            _validate_manager_heuristic_identity(
+                manifest,
+                manager_identity[0],
+                manager_identity[1],
+            )
     else:
         if not str(dataset_id).strip():
             raise ValueError("dataset_id must not be empty")
@@ -729,6 +821,13 @@ def append_demonstration_episode(
             ),
             "episodes": [],
         }
+        if manager_identity is not None:
+            manifest["manager_heuristic_ids"] = list(
+                manager_identity[0]
+            )
+            manifest["manager_heuristic_manifest_sha256"] = (
+                manager_identity[1]
+            )
     entries = manifest.get("episodes")
     if not isinstance(entries, list):
         raise ValueError(
@@ -750,6 +849,20 @@ def append_demonstration_episode(
             "demonstration layer dimensions cannot change in one "
             "dataset"
         )
+    if manager_identity is not None:
+        manager_action_dim = int(
+            episode.layer_dimensions["manager"]["action_dim"]
+        )
+        if len(manager_identity[0]) != manager_action_dim:
+            raise ValueError(
+                "Manager heuristic IDs count must match Manager "
+                "action_dim"
+            )
+        if episode.heuristic_id not in manager_identity[0]:
+            raise ValueError(
+                "demonstration heuristic is not in the Manager "
+                "action space"
+            )
     observation_schemas = manifest.get(
         "observation_schema_versions"
     )
@@ -849,6 +962,8 @@ def load_demonstration_split(
     split: str,
     *,
     require_safe: bool = True,
+    expected_manager_heuristic_ids: Sequence[str] | None = None,
+    expected_manager_heuristic_manifest_sha256: str | None = None,
 ) -> dict:
     """严格加载 train/validation；final_test 永不作为预训练数据返回。"""
     selected_split = str(split).strip().lower()
@@ -887,6 +1002,11 @@ def load_demonstration_split(
         raise ValueError(
             "safe demonstration manifest hash mismatch"
         )
+    _validate_manager_heuristic_identity(
+        manifest,
+        expected_manager_heuristic_ids,
+        expected_manager_heuristic_manifest_sha256,
+    )
     seed_split = StrictSeedSplit.from_dict(
         manifest["seed_split"]
     )

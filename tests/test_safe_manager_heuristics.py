@@ -819,6 +819,25 @@ class LegacyManagerModeTests(unittest.TestCase):
 class LlmOnlyHeuristicTests(unittest.TestCase):
     """验证 --llm-only-heuristics 真正移除传统规则动作槽。"""
 
+    def test_safe_manager_defaults_to_llm_only(self):
+        from hrl_mix.train_config import build_train_config
+
+        with tempfile.TemporaryDirectory() as td:
+            manifest = _write_test_library(Path(td))
+            with mock.patch("hrl_mix.train_config.os.makedirs"):
+                config = build_train_config(
+                    protocol="single",
+                    source_scenario="SS",
+                    ddl="T",
+                    max_episodes=1,
+                    safe_rl_enabled=True,
+                    safe_rl_shield_enabled=True,
+                    safe_rl_state_enabled=True,
+                    safe_rl_heuristic_manager_enabled=True,
+                    manager_heuristic_manifest=str(manifest),
+                )
+        self.assertTrue(config.safe_rl.manager_heuristics.llm_only)
+
     def test_traditional_slots_are_removed_not_just_masked(self):
         with tempfile.TemporaryDirectory() as td:
             manifest = _write_test_library(Path(td))

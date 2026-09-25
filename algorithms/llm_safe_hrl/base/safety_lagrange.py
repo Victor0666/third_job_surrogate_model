@@ -1,9 +1,8 @@
 # -*- coding: utf-8 -*-
 """Episode 级共享拉格朗日安全控制器。
 
-控制器只消费环境已经独立生成的 ``safety_cost`` 统计，不修改 reward、动作
-合法性或 safety shield。Manager、Host、VM 的 Q_c 网络仍然彼此独立，但动作
-评分共享同一个 ``lambda_DDL``，避免对同一环境安全代价做三次预算更新。
+Q_c 继续学习 dense ``safety_cost``；本控制器只消费 episode 实际工作流 DDL
+违反率。Manager、Host、VM 的动作评分共享同一个 ``lambda_DDL``。
 """
 
 from __future__ import annotations
@@ -13,15 +12,9 @@ from typing import Any, Iterable, Mapping
 
 
 class LagrangeSafetyController:
-    """在 episode 边界用安全代价 EMA 更新共享 ``lambda_DDL``。
+    """在 episode 边界用实际工作流 DDL 违反率更新共享 ``lambda_DDL``。
 
-    ``observe_episode()`` 的输入是 episode 内所有环境安全转换的 cost 总和及
-    转换数。原始 episode 统计量定义为：
-
-    ``J_c_episode = episode_safety_cost / safety_transition_count``。
-
-    控制器以 ``cost_ema_factor`` 做指数滑动平均，并使用该 EMA 作为拉格朗日
-    更新中的 ``J_c``。更新不会逐 transition 发生。
+    ``cost_ema_factor`` 与旧状态字段仅为 checkpoint 兼容保留，不再参与更新。
     """
 
     STATE_VERSION = 1
@@ -31,13 +24,13 @@ class LagrangeSafetyController:
         *,
         enabled: bool = False,
         lambda_init: float = 1.0,
-        lambda_lr: float = 0.01,
+        lambda_lr: float = 0.05,
         lambda_min: float = 0.0,
         lambda_max: float = 100.0,
-        cost_budget: float = 0.0,
+        cost_budget: float = 0.01,
         update_interval: int = 1,
         cost_ema_factor: float = 0.9,
-        warmup_steps: int = 5,
+        warmup_steps: int = 0,
     ):
         self.enabled = bool(enabled)
         self.lambda_init = float(lambda_init)
@@ -59,6 +52,10 @@ class LagrangeSafetyController:
         self.mean_safety_cost = 0.0
         self.last_episode_safety_cost = 0.0
         self.constraint_gap = -self.cost_budget
+        self.episode_violation_rate = 0.0
+        self.lambda_before = float(self.current_lambda)
+        self.lambda_after = float(self.current_lambda)
+        self.lagrange_gap = -self.cost_budget
         self.lambda_update_count = 0
         self.observed_episode_count = 0
         self.invalid_sample_count = 0
@@ -107,54 +104,30 @@ class LagrangeSafetyController:
     def observe_episode(
         self,
         *,
-        episode_safety_cost: float,
-        safety_transition_count: int,
+        episode_violation_rate: float,
     ) -> dict[str, Any]:
-        """记录一个 episode，并在符合周期时更新共享 lambda。
-
-        非有限或负 cost 会被拒绝且不进入 EMA；这类样本不会把 lambda 污染为
-        NaN。零 transition 的 episode 记为均值 0。
-        """
+        """记录一个 episode，并按违反率相对预算的 gap 更新共享 lambda。"""
         self.last_update_applied = False
+        self.lambda_before = float(self.current_lambda)
+        self.lambda_after = float(self.current_lambda)
         if not self.enabled:
             self.last_update_reason = "disabled"
             return self.diagnostics()
 
-        total_cost = float(episode_safety_cost)
-        transition_count = int(safety_transition_count)
-        if (
-            not math.isfinite(total_cost)
-            or total_cost < 0.0
-            or transition_count < 0
-        ):
+        violation_rate = float(episode_violation_rate)
+        if not math.isfinite(violation_rate) or violation_rate < 0.0:
             self.invalid_sample_count += 1
-            self.last_update_reason = "invalid_episode_cost"
-            return self.diagnostics()
-
-        episode_mean = (
-            total_cost / transition_count
-            if transition_count > 0
-            else 0.0
-        )
-        if not math.isfinite(episode_mean) or episode_mean < 0.0:
-            self.invalid_sample_count += 1
-            self.last_update_reason = "invalid_episode_mean"
+            self.last_update_reason = "invalid_violation_rate"
             return self.diagnostics()
 
         self.observed_episode_count += 1
-        self.last_episode_safety_cost = float(episode_mean)
-        if not self._ema_initialized:
-            self.mean_safety_cost = float(episode_mean)
-            self._ema_initialized = True
-        else:
-            beta = self.cost_ema_factor
-            self.mean_safety_cost = float(
-                beta * self.mean_safety_cost
-                + (1.0 - beta) * episode_mean
-            )
-        self.constraint_gap = float(
-            self.mean_safety_cost - self.cost_budget
-        )
+        self.episode_violation_rate = violation_rate
+        # 旧字段作为违反率别名保留，避免旧日志/checkpoint 读取器失效。
+        self.last_episode_safety_cost = violation_rate
+        self.mean_safety_cost = violation_rate
+        self._ema_initialized = True
+        self.lagrange_gap = float(violation_rate - self.cost_budget)
+        self.constraint_gap = self.lagrange_gap
 
         if self.observed_episode_count <= self.warmup_steps:
             self.last_update_reason = "warmup"
@@ -167,12 +140,12 @@ class LagrangeSafetyController:
             self.last_update_reason = "update_interval"
             return self.diagnostics()
 
-        delta = self.lambda_lr * self.constraint_gap
+        delta = self.lambda_lr * self.lagrange_gap
         candidate = self.current_lambda + delta
         if not math.isfinite(candidate):
             candidate = (
                 self.lambda_max
-                if self.constraint_gap > 0.0
+                if self.lagrange_gap > 0.0
                 else self.lambda_min
             )
         self.current_lambda = float(
@@ -184,6 +157,7 @@ class LagrangeSafetyController:
         if not math.isfinite(self.current_lambda):
             # 配置已校验为有限值；此分支是最后一道防护。
             self.current_lambda = float(self.lambda_max)
+        self.lambda_after = float(self.current_lambda)
 
         self.lambda_update_count += 1
         self.last_update_applied = True
@@ -200,6 +174,12 @@ class LagrangeSafetyController:
             ),
             "cost_budget": float(self.cost_budget),
             "constraint_gap": float(self.constraint_gap),
+            "episode_violation_rate": float(
+                self.episode_violation_rate
+            ),
+            "lambda_before": float(self.lambda_before),
+            "lambda_after": float(self.lambda_after),
+            "lagrange_gap": float(self.lagrange_gap),
             "lambda_update_count": int(self.lambda_update_count),
             "observed_episode_count": int(
                 self.observed_episode_count
@@ -210,13 +190,14 @@ class LagrangeSafetyController:
             ),
             "lambda_update_reason": self.last_update_reason,
             "lagrange_enabled": bool(self.enabled),
-            "lagrange_update_period": "episode_ema",
+            "lagrange_update_period": "episode_violation_rate",
         }
 
     def state_dict(self) -> dict[str, Any]:
         """返回仅含安全标量/整数的 checkpoint 状态。"""
         return {
             "state_version": self.STATE_VERSION,
+            "constraint_signal": "episode_violation_rate",
             "enabled": bool(self.enabled),
             "lambda_init": float(self.lambda_init),
             "lambda_lr": float(self.lambda_lr),
@@ -232,6 +213,12 @@ class LagrangeSafetyController:
                 self.last_episode_safety_cost
             ),
             "constraint_gap": float(self.constraint_gap),
+            "episode_violation_rate": float(
+                self.episode_violation_rate
+            ),
+            "lambda_before": float(self.lambda_before),
+            "lambda_after": float(self.lambda_after),
+            "lagrange_gap": float(self.lagrange_gap),
             "lambda_update_count": int(self.lambda_update_count),
             "observed_episode_count": int(
                 self.observed_episode_count
@@ -304,7 +291,44 @@ class LagrangeSafetyController:
         self.current_lambda = current_lambda
         self.mean_safety_cost = mean_cost
         self.last_episode_safety_cost = last_cost
-        self.constraint_gap = gap
+        has_violation_rate_state = (
+            state.get("constraint_signal")
+            == "episode_violation_rate"
+            or "episode_violation_rate" in state
+        )
+        self.episode_violation_rate = float(
+            state.get("episode_violation_rate", 0.0)
+        )
+        self.lambda_before = float(
+            state.get("lambda_before", current_lambda)
+        )
+        self.lambda_after = float(
+            state.get("lambda_after", current_lambda)
+        )
+        self.lagrange_gap = float(
+            state.get(
+                "lagrange_gap",
+                (
+                    gap
+                    if has_violation_rate_state
+                    else -self.cost_budget
+                ),
+            )
+        )
+        self.constraint_gap = self.lagrange_gap
+        if not all(
+            math.isfinite(value)
+            for value in (
+                self.episode_violation_rate,
+                self.lambda_before,
+                self.lambda_after,
+                self.lagrange_gap,
+            )
+        ):
+            raise ValueError(
+                "lagrange controller checkpoint contains non-finite "
+                "violation-rate state"
+            )
         self.lambda_update_count = int(
             state["lambda_update_count"]
         )

@@ -591,14 +591,17 @@
     },
     {
       "method_id": "llm_augmented_safe_hrl",
-      "description": "完整安全 HRL，Manager 从传统和已准入 SeEvo ready-task 规则中选择；资源动作仍由 Host/VM Agent 与 shield 控制。",
+      "description": "正式 LLM-SAFE-HRL，Manager 仅从指定 Top-K manifest 中已准入且可用的 LLM ready-task 规则中选择；资源动作仍由 Host/VM Agent 与 shield 控制。",
       "execution_adapter": "safe_hrl_train_runner",
+      "runtime_overrides": {
+        "curriculum_enabled": false
+      },
       "components": {
         "policy_family": "hrl",
         "manager_policy": "heuristic_selection_safe_observation",
         "manager_observation": "safe",
         "task_ordering": "manager_selected_heuristic",
-        "heuristic_candidate_set": "FCFS,SJF,MCF,HUR,EDF,admitted_seevo",
+        "heuristic_candidate_set": "admitted_topk_llm_only",
         "fixed_heuristic_id": null,
         "llm_enabled": true,
         "llm_rule_mode": "manager_selects_admitted_rule",
@@ -621,19 +624,19 @@
       }
     },
     {
-      "method_id": "llm_safe_hrl_without_curriculum",
-      "description": "Full LLM-SAFE-DRL with the curriculum schedule disabled; the frozen source scenario is used for all 600 training episodes.",
+      "method_id": "llm_safe_hrl_with_curriculum",
+      "description": "Curriculum ablation of LLM-SAFE-DRL; staged curriculum profiles are explicitly enabled.",
       "execution_adapter": "safe_hrl_train_runner",
-      "output_namespace": "llm_safe_hrl_without_curriculum",
+      "output_namespace": "llm_safe_hrl_with_curriculum",
       "runtime_overrides": {
-        "curriculum_enabled": false
+        "curriculum_enabled": true
       },
       "components": {
         "policy_family": "hrl",
         "manager_policy": "heuristic_selection_safe_observation",
         "manager_observation": "safe",
         "task_ordering": "manager_selected_heuristic",
-        "heuristic_candidate_set": "FCFS,SJF,MCF,HUR,EDF,admitted_seevo",
+        "heuristic_candidate_set": "admitted_topk_llm_only",
         "fixed_heuristic_id": null,
         "llm_enabled": true,
         "llm_rule_mode": "manager_selects_admitted_rule",

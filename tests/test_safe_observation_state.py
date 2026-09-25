@@ -72,7 +72,7 @@ class SafeObservationCompatibilityTests(unittest.TestCase):
         config = SafeRLConfig()
         self.assertFalse(config.enabled)
         self.assertFalse(config.state.enabled)
-        self.assertEqual(config.safety_discount, 0.95)
+        self.assertEqual(config.safety_discount, 0.99)
         self.assertEqual(config.safety_learning_rate, 3e-4)
         self.assertEqual(config.safety_loss_weight, 1.0)
         self.assertEqual(

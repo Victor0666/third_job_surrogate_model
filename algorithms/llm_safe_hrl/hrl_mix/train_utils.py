@@ -468,8 +468,10 @@ def compute_episode_task_lateness_metrics(env: CloudWorkflowEnv_VMAgents) -> tup
 
 def warmup_ready(agent: D3QNAgent, frac: float = 0.1) -> bool:
     """判断 replay buffer 是否达到 warmup 门槛，可以开始执行 update()。"""
-    maxlen = agent.buffer.maxlen or 0
-    need = int(maxlen * float(frac))
+    capacity = getattr(agent.buffer, "maxlen", None)
+    if capacity is None:
+        capacity = int(agent.buffer_size)
+    need = int(capacity * float(frac))
     need = max(need, int(agent.batch_size))
     return len(agent.buffer) >= need
 

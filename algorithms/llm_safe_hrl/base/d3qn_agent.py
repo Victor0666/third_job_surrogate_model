@@ -116,7 +116,7 @@ class D3QNAgent:
         per_beta_steps: int = 150000,
         observation_schema_version: str = "legacy_observation",
         safe_rl_enabled: bool = False,
-        safety_discount: float = 0.95,
+        safety_discount: float = 0.99,
         safety_learning_rate: float = 3e-4,
         safety_loss_weight: float = 1.0,
         initial_lagrange_multiplier: float = 1.0,

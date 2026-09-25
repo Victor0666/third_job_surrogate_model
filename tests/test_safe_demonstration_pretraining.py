@@ -228,6 +228,102 @@ class DemonstrationDatasetTests(unittest.TestCase):
         )
         self.assertEqual(record["trajectory_count"]["total"], 3)
 
+    def _append_manager_identity_dataset(self):
+        heuristic_ids = ("traditional_edf", "rule_B")
+        manifest_hash = "a" * 64
+        manifest = append_demonstration_episode(
+            self.manifest_path,
+            _episode("train.safe", "train", 1, 11),
+            seed_split=_seed_split(),
+            manager_heuristic_ids=heuristic_ids,
+            manager_heuristic_manifest_sha256=manifest_hash,
+        )
+        self.assertEqual(
+            manifest["manager_heuristic_ids"],
+            list(heuristic_ids),
+        )
+        self.assertEqual(
+            manifest["manager_heuristic_manifest_sha256"],
+            manifest_hash,
+        )
+        return heuristic_ids, manifest_hash
+
+    def test_same_action_dim_with_different_manager_ids_is_rejected(self):
+        _, manifest_hash = self._append_manager_identity_dataset()
+        with self.assertRaisesRegex(
+            ValueError, "Manager heuristic IDs mismatch"
+        ):
+            load_demonstration_split(
+                self.manifest_path,
+                "train",
+                expected_manager_heuristic_ids=(
+                    "traditional_edf",
+                    "rule_C",
+                ),
+                expected_manager_heuristic_manifest_sha256=(
+                    manifest_hash
+                ),
+            )
+
+    def test_manager_id_order_mismatch_is_rejected(self):
+        heuristic_ids, manifest_hash = (
+            self._append_manager_identity_dataset()
+        )
+        with self.assertRaisesRegex(
+            ValueError, "Manager heuristic order mismatch"
+        ):
+            load_demonstration_split(
+                self.manifest_path,
+                "train",
+                expected_manager_heuristic_ids=tuple(
+                    reversed(heuristic_ids)
+                ),
+                expected_manager_heuristic_manifest_sha256=(
+                    manifest_hash
+                ),
+            )
+
+    def test_manager_manifest_hash_mismatch_is_rejected(self):
+        heuristic_ids, _ = self._append_manager_identity_dataset()
+        with self.assertRaisesRegex(
+            ValueError, "Manager heuristic manifest hash mismatch"
+        ):
+            load_demonstration_split(
+                self.manifest_path,
+                "train",
+                expected_manager_heuristic_ids=heuristic_ids,
+                expected_manager_heuristic_manifest_sha256="b" * 64,
+            )
+
+    def test_matching_manager_identity_is_accepted(self):
+        heuristic_ids, manifest_hash = (
+            self._append_manager_identity_dataset()
+        )
+        loaded = load_demonstration_split(
+            self.manifest_path,
+            "train",
+            expected_manager_heuristic_ids=heuristic_ids,
+            expected_manager_heuristic_manifest_sha256=manifest_hash,
+        )
+        self.assertEqual(len(loaded["episodes"]), 1)
+
+    def test_legacy_manifest_requires_regeneration_for_llm_only(self):
+        append_demonstration_episode(
+            self.manifest_path,
+            _episode("train.safe", "train", 1, 11),
+            seed_split=_seed_split(),
+        )
+        with self.assertRaisesRegex(ValueError, "regenerate"):
+            load_demonstration_split(
+                self.manifest_path,
+                "train",
+                expected_manager_heuristic_ids=(
+                    "traditional_edf",
+                    "rule_B",
+                ),
+                expected_manager_heuristic_manifest_sha256="a" * 64,
+            )
+
     def test_unsafe_episode_is_not_a_safe_demonstration(self):
         unsafe = _episode(
             "train.unsafe", "train", 1, 11, safe=False
@@ -318,11 +414,20 @@ class OfflinePretrainingTests(unittest.TestCase):
         self.manifest_path = (
             Path(self.temporary.name) / "manifest.json"
         )
+        self.manager_heuristic_ids = (
+            "traditional_edf",
+            "rule_B",
+        )
+        self.manager_manifest_sha256 = "a" * 64
         split = _seed_split()
         append_demonstration_episode(
             self.manifest_path,
             _episode("train.safe", "train", 1, 11),
             seed_split=split,
+            manager_heuristic_ids=self.manager_heuristic_ids,
+            manager_heuristic_manifest_sha256=(
+                self.manager_manifest_sha256
+            ),
         )
         append_demonstration_episode(
             self.manifest_path,
@@ -330,6 +435,10 @@ class OfflinePretrainingTests(unittest.TestCase):
                 "validation.safe", "validation", 2, 12
             ),
             seed_split=split,
+            manager_heuristic_ids=self.manager_heuristic_ids,
+            manager_heuristic_manifest_sha256=(
+                self.manager_manifest_sha256
+            ),
         )
 
     def tearDown(self):
@@ -370,6 +479,10 @@ class OfflinePretrainingTests(unittest.TestCase):
                 behavior_cloning_weight=0.1,
                 sync_targets_after_pretraining=False,
                 random_seed=5,
+            ),
+            manager_heuristic_ids=self.manager_heuristic_ids,
+            manager_heuristic_manifest_sha256=(
+                self.manager_manifest_sha256
             ),
         )
         self.assertTrue(report["enabled"])

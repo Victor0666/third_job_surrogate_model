@@ -635,6 +635,7 @@ def test_safe_hrl_cli_forwards_single_and_multi_protocol_switches():
         safe_hrl_cli.main(
             [
                 "--protocol", "single", "--source-scenario", "SM",
+                "--safe-rl-lambda-lr", "0.2",
                 *[
                     value
                     for scenario, path in single_caches.items()
@@ -647,6 +648,7 @@ def test_safe_hrl_cli_forwards_single_and_multi_protocol_switches():
     assert mocked_train.call_args.kwargs["protocol"] == "single"
     assert mocked_train.call_args.kwargs["source_scenario"] == "SM"
     assert mocked_train.call_args.kwargs["resource_scale"] is None
+    assert mocked_train.call_args.kwargs["safe_rl_lambda_lr"] == 0.2
     assert mocked_train.call_args.kwargs["deadline_cache_paths"] == {
         scenario: str(path.resolve())
         for scenario, path in single_caches.items()
@@ -659,6 +661,7 @@ def test_safe_hrl_cli_forwards_single_and_multi_protocol_switches():
     assert mocked_train.call_args.kwargs["protocol"] == "multi"
     assert mocked_train.call_args.kwargs["source_scenario"] is None
     assert mocked_train.call_args.kwargs["resource_scale"] == "L"
+    assert mocked_train.call_args.kwargs["safe_rl_lambda_lr"] == 0.05
 
 
 def test_safe_hrl_protocol_rejects_ambiguous_or_cross_domain_inputs():

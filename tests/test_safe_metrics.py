@@ -265,6 +265,29 @@ class SafeMetricAggregationTests(unittest.TestCase):
             0.5,
         )
 
+    def test_fallback_max_lateness_keeps_raw_seconds(self):
+        env = _MetricEnvironment(
+            deadlines=(100.0,),
+            fuzzy_finishes=((100.0, 100.0, 100.0),),
+            energy_mean=1.0,
+            energy_std=0.0,
+            modal_energy=1.0,
+        )
+        env.wf_finish_time = {}
+        env._safety_cumulative_completed_workflow_count = 1
+        env._safety_cumulative_deadline_violation_count = 1
+        env._safety_cumulative_fuzzy_lateness_cost = 600.0
+        env._safety_cumulative_normalized_lateness = 2.0
+
+        record = build_episode_metric_record(
+            env,
+            seed=1,
+            scheduling_time_seconds=0.0,
+        )
+
+        self.assertEqual(record["max_fuzzy_lateness"], 600.0)
+        self.assertNotEqual(record["max_fuzzy_lateness"], 2.0)
+
     def test_worst_seed_is_preserved_instead_of_averaged_away(self):
         report = aggregate_safe_metric_records(self._records())
         self.assertEqual(

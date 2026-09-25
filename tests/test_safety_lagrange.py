@@ -1,4 +1,4 @@
-"""阶段 8 共享 episode/EMA 动态拉格朗日控制器测试。"""
+"""阶段 8 共享 episode 违反率动态拉格朗日控制器测试。"""
 
 from __future__ import annotations
 
@@ -44,7 +44,7 @@ class LagrangeSafetyControllerTests(unittest.TestCase):
             "lambda_lr": 0.5,
             "lambda_min": 0.0,
             "lambda_max": 10.0,
-            "cost_budget": 0.0,
+            "cost_budget": 0.01,
             "update_interval": 1,
             "cost_ema_factor": 0.0,
             "warmup_steps": 0,
@@ -52,29 +52,26 @@ class LagrangeSafetyControllerTests(unittest.TestCase):
         options.update(overrides)
         return LagrangeSafetyController(**options)
 
-    def test_cost_above_budget_increases_lambda(self):
+    def test_violation_rate_above_budget_increases_lambda(self):
         controller = self._controller()
         result = controller.observe_episode(
-            episode_safety_cost=4.0,
-            safety_transition_count=2,
+            episode_violation_rate=0.02,
         )
-        self.assertAlmostEqual(result["mean_safety_cost"], 2.0)
-        self.assertAlmostEqual(result["constraint_gap"], 2.0)
-        self.assertAlmostEqual(result["current_lambda"], 2.0)
+        self.assertAlmostEqual(result["episode_violation_rate"], 0.02)
+        self.assertAlmostEqual(result["lagrange_gap"], 0.01)
+        self.assertAlmostEqual(result["current_lambda"], 1.005)
         self.assertEqual(result["lambda_update_count"], 1)
 
-    def test_cost_below_budget_decreases_lambda(self):
+    def test_violation_rate_below_budget_decreases_lambda(self):
         controller = self._controller(
             lambda_init=2.0,
-            cost_budget=2.0,
         )
         result = controller.observe_episode(
-            episode_safety_cost=2.0,
-            safety_transition_count=2,
+            episode_violation_rate=0.0,
         )
-        self.assertAlmostEqual(result["mean_safety_cost"], 1.0)
-        self.assertAlmostEqual(result["constraint_gap"], -1.0)
-        self.assertAlmostEqual(result["current_lambda"], 1.5)
+        self.assertAlmostEqual(result["lagrange_gap"], -0.01)
+        self.assertAlmostEqual(result["lambda_before"], 2.0)
+        self.assertAlmostEqual(result["lambda_after"], 1.995)
 
     def test_lambda_respects_both_bounds(self):
         upper = self._controller(
@@ -83,50 +80,43 @@ class LagrangeSafetyControllerTests(unittest.TestCase):
             lambda_max=3.0,
         )
         upper.observe_episode(
-            episode_safety_cost=10.0,
-            safety_transition_count=1,
+            episode_violation_rate=1.0,
         )
         self.assertEqual(upper.current_lambda, 3.0)
 
         lower = self._controller(
             lambda_init=1.0,
             lambda_lr=100.0,
-            cost_budget=10.0,
         )
         lower.observe_episode(
-            episode_safety_cost=0.0,
-            safety_transition_count=1,
+            episode_violation_rate=0.0,
         )
         self.assertEqual(lower.current_lambda, 0.0)
 
-    def test_warmup_interval_and_ema_are_episode_based(self):
+    def test_warmup_and_interval_are_episode_based(self):
         controller = self._controller(
             lambda_lr=1.0,
             warmup_steps=2,
             update_interval=2,
             cost_ema_factor=0.5,
         )
-        for cost in (2.0, 4.0, 6.0):
+        for violation_rate in (0.2, 0.4, 0.6):
             result = controller.observe_episode(
-                episode_safety_cost=cost,
-                safety_transition_count=1,
+                episode_violation_rate=violation_rate,
             )
             self.assertFalse(result["lambda_update_applied"])
         result = controller.observe_episode(
-            episode_safety_cost=8.0,
-            safety_transition_count=1,
+            episode_violation_rate=0.8,
         )
-        # EMA: 2 -> 3 -> 4.5 -> 6.25。
-        self.assertAlmostEqual(result["mean_safety_cost"], 6.25)
-        self.assertAlmostEqual(result["current_lambda"], 7.25)
+        self.assertAlmostEqual(result["episode_violation_rate"], 0.8)
+        self.assertAlmostEqual(result["current_lambda"], 1.79)
         self.assertEqual(result["lambda_update_count"], 1)
         self.assertEqual(result["observed_episode_count"], 4)
 
     def test_state_dict_restores_controller_exactly(self):
         source = self._controller(cost_ema_factor=0.5)
         source.observe_episode(
-            episode_safety_cost=3.0,
-            safety_transition_count=2,
+            episode_violation_rate=0.03,
         )
         restored = self._controller(cost_ema_factor=0.5)
         restored.load_state_dict(source.state_dict())
@@ -135,8 +125,7 @@ class LagrangeSafetyControllerTests(unittest.TestCase):
     def test_safe_rl_disabled_keeps_lambda_fixed(self):
         controller = self._controller(enabled=False)
         result = controller.observe_episode(
-            episode_safety_cost=100.0,
-            safety_transition_count=1,
+            episode_violation_rate=1.0,
         )
         self.assertEqual(result["current_lambda"], 1.0)
         self.assertEqual(result["lambda_update_count"], 0)
@@ -167,15 +156,24 @@ class LagrangeSafetyControllerTests(unittest.TestCase):
         lagrange = config.safe_rl.lagrangian
         self.assertTrue(lagrange.enabled)
         self.assertEqual(lagrange.lambda_init, 1.0)
-        self.assertEqual(lagrange.lambda_lr, 0.01)
+        self.assertEqual(lagrange.lambda_lr, 0.05)
         self.assertEqual(lagrange.lambda_min, 0.0)
         self.assertEqual(lagrange.lambda_max, 100.0)
-        self.assertEqual(lagrange.cost_budget, 0.0)
+        self.assertEqual(lagrange.cost_budget, 0.01)
         self.assertEqual(lagrange.update_interval, 1)
         self.assertEqual(lagrange.cost_ema_factor, 0.9)
-        self.assertEqual(lagrange.warmup_steps, 5)
+        self.assertEqual(lagrange.warmup_steps, 0)
         self.assertTrue(config.run_name.startswith("safe-ss-t-"))
         self.assertLessEqual(len(Path(config.save_dir).name), 48)
+
+    def test_lambda_lr_override_reaches_lagrangian_config(self):
+        with patch("hrl_mix.train_config.os.makedirs"):
+            config = build_train_config(
+                safe_rl_enabled=True,
+                safe_rl_dynamic_lambda_enabled=True,
+                safe_rl_lambda_lr=0.2,
+            )
+        self.assertEqual(config.safe_rl.lagrangian.lambda_lr, 0.2)
 
     def test_run_names_are_short_stable_and_safe_modes_are_distinct(self):
         with patch("hrl_mix.train_config.os.makedirs"):
@@ -204,8 +202,7 @@ class LagrangeSafetyControllerTests(unittest.TestCase):
     def test_non_finite_cost_is_rejected_without_nan(self):
         controller = self._controller()
         result = controller.observe_episode(
-            episode_safety_cost=float("nan"),
-            safety_transition_count=1,
+            episode_violation_rate=float("nan"),
         )
         self.assertTrue(math.isfinite(result["current_lambda"]))
         self.assertTrue(math.isfinite(result["mean_safety_cost"]))
@@ -220,17 +217,16 @@ class LagrangeSafetyControllerTests(unittest.TestCase):
         agents = [FakeAgent(), FakeAgent(), FakeAgent()]
         controller = self._controller()
         controller.observe_episode(
-            episode_safety_cost=2.0,
-            safety_transition_count=1,
+            episode_violation_rate=0.02,
         )
         value = synchronize_lagrange_multiplier(
             controller,
             agents,
         )
-        self.assertEqual(value, 2.0)
+        self.assertEqual(value, 1.005)
         self.assertEqual(
             [agent.lagrange_multiplier for agent in agents],
-            [2.0, 2.0, 2.0],
+            [1.005, 1.005, 1.005],
         )
 
 @unittest.skipUnless(TORCH_AVAILABLE, "PyTorch is not installed")
@@ -251,6 +247,8 @@ class LagrangeCheckpointIntegrationTests(unittest.TestCase):
         class EpisodeEnvironment:
             _safety_cumulative_cost = 6.0
             _safety_cumulative_transition_count = 3
+            _safety_cumulative_deadline_violation_count = 1
+            _safety_cumulative_completed_workflow_count = 2
 
         controller = LagrangeSafetyController(
             enabled=True,
@@ -269,11 +267,11 @@ class LagrangeCheckpointIntegrationTests(unittest.TestCase):
             EpisodeEnvironment(),
             agents,
         )
-        self.assertAlmostEqual(result["mean_safety_cost"], 2.0)
-        self.assertAlmostEqual(result["current_lambda"], 1.5)
+        self.assertAlmostEqual(result["episode_violation_rate"], 0.5)
+        self.assertAlmostEqual(result["current_lambda"], 1.125)
         self.assertEqual(
             [agent.lagrange_multiplier for agent in agents],
-            [1.5, 1.5, 1.5],
+            [1.125, 1.125, 1.125],
         )
 
     def test_final_evaluation_uses_zero_violation_standard(self):
@@ -344,8 +342,7 @@ class LagrangeCheckpointIntegrationTests(unittest.TestCase):
             warmup_steps=0,
         )
         controller.observe_episode(
-            episode_safety_cost=4.0,
-            safety_transition_count=2,
+            episode_violation_rate=0.5,
         )
         agent = self._agent(
             initial_lambda=controller.current_lambda

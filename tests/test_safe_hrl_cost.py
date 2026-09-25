@@ -28,6 +28,11 @@ def _safety_stub(
     environment.safe_rl_enabled = True
     environment.fuzzy_enabled = True
     environment.fuzzy_deadline_eta = 0.95
+    environment.safe_rl_lateness_normalizer = 300.0
+    environment.safe_rl_lateness_clip = 5.0
+    environment.safe_rl_delta_risk_weight = 0.5
+    environment.safe_rl_violation_weight = 1.0
+    environment.safe_rl_lateness_weight = 1.0
     environment.current_time = float(current_time)
     environment.workflows = [
         SimpleNamespace(deadline=float(deadline), arrival_time=0.0)
@@ -37,9 +42,11 @@ def _safety_stub(
     )
     environment._safety_accounted_workflow_ids = set()
     environment._safety_cumulative_cost = 0.0
+    environment._safety_cumulative_transition_count = 0
     environment._safety_cumulative_deadline_violation_count = 0
     environment._safety_cumulative_completed_workflow_count = 0
     environment._safety_cumulative_fuzzy_lateness_cost = 0.0
+    environment._safety_cumulative_normalized_lateness = 0.0
     environment._safety_cumulative_process_risk_cost = 0.0
     if finish_tfn is not None:
         environment._workflow_finish_tfn = (
@@ -75,24 +82,51 @@ class SafeWorkflowCostTests(unittest.TestCase):
         info = environment.get_safety_diagnostics()
         # R(T) = 0.05 * 10 + 0.95 * 12 = 11.9。
         self.assertAlmostEqual(info["deadline_violation_cost"], 1.0)
-        self.assertAlmostEqual(info["fuzzy_lateness_cost"], 1.9)
-        self.assertAlmostEqual(info["safety_cost"], 2.9)
+        self.assertAlmostEqual(
+            info["raw_fuzzy_lateness_seconds"], 1.9
+        )
+        self.assertAlmostEqual(
+            info["normalized_lateness"], 1.9 / 300.0
+        )
+        self.assertAlmostEqual(
+            info["safety_cost"], 1.0 + 1.9 / 300.0
+        )
         self.assertEqual(info["deadline_violation_count"], 1)
 
-    def test_unfinished_workflow_risk_after_deadline_is_one(self):
+    def test_raw_lateness_is_normalized_before_entering_qc(self):
+        environment = _safety_stub(
+            deadline=100.0,
+            finish_tfn=TriangularFuzzyNumber(700.0, 700.0, 700.0),
+        )
+        info = environment.get_safety_diagnostics()
+        self.assertEqual(info["raw_fuzzy_lateness_seconds"], 600.0)
+        self.assertEqual(info["fuzzy_lateness_cost"], 600.0)
+        self.assertEqual(info["normalized_lateness"], 2.0)
+        self.assertEqual(info["cumulative_fuzzy_lateness_cost"], 600.0)
+        self.assertEqual(info["cumulative_normalized_lateness"], 2.0)
+        self.assertEqual(info["safety_cost"], 3.0)
+
+    def test_decreasing_process_risk_has_zero_delta_cost(self):
         environment = _safety_stub(
             deadline=10.0,
             finish_tfn=None,
-            current_time=5.0,
-            predicted_tfn=TriangularFuzzyNumber(9.0, 10.0, 12.0),
+            predicted_tfn=TriangularFuzzyNumber(5.0, 5.0, 5.0),
         )
-        info = environment.get_safety_diagnostics()
-        self.assertEqual(info["completed_workflow_count"], 0)
-        self.assertEqual(info["deadline_violation_cost"], 0.0)
-        self.assertEqual(info["fuzzy_lateness_cost"], 0.0)
-        self.assertEqual(info["process_risk_cost"], 1.0)
-        self.assertEqual(info["safety_cost"], 1.0)
-        self.assertEqual(info["predicted_deadline_violation_count"], 1)
+        info = environment.get_safety_diagnostics(risk_before=0.6)
+        self.assertEqual(info["process_risk_after"], 0.5)
+        self.assertEqual(info["positive_delta_risk"], 0.0)
+        self.assertEqual(info["safety_cost"], 0.0)
+
+    def test_increasing_process_risk_uses_only_positive_delta(self):
+        environment = _safety_stub(
+            deadline=10.0,
+            finish_tfn=None,
+            predicted_tfn=TriangularFuzzyNumber(7.0, 7.0, 7.0),
+        )
+        info = environment.get_safety_diagnostics(risk_before=0.5)
+        self.assertAlmostEqual(info["process_risk_after"], 0.7)
+        self.assertAlmostEqual(info["positive_delta_risk"], 0.2)
+        self.assertAlmostEqual(info["safety_cost"], 0.1)
 
     def test_completed_workflow_is_not_charged_twice(self):
         environment = _safety_stub(
@@ -126,9 +160,14 @@ class SafeRLBackwardCompatibilityTests(unittest.TestCase):
             1,
         )
         self.assertEqual(config.replay.near_boundary_margin, 1.0)
-        self.assertFalse(config.replay.combined_per_priority)
+        self.assertTrue(config.replay.host_use_per)
+        self.assertTrue(config.replay.vm_use_per)
+        self.assertFalse(config.replay.manager_use_per)
+        self.assertTrue(config.replay.combined_per_priority)
         self.assertEqual(config.replay.performance_td_weight, 1.0)
         self.assertEqual(config.replay.safety_td_weight, 1.0)
+        self.assertEqual(config.safety_discount, 0.99)
+        self.assertEqual(config.lateness_normalizer, 300.0)
 
     def test_legacy_environment_return_shapes_still_run(self):
         dax_path = PROJECT_ROOT / "data" / "dax" / "Montage_25.xml"
