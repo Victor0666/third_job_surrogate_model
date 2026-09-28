@@ -202,7 +202,8 @@ class ParameterizedTopKTests(unittest.TestCase):
             manifest = _write_topk_library(Path(raw_directory))
             with mock.patch("hrl_mix.train_config.os.makedirs"):
                 demo = build_train_config(
-                    scenario="SS",
+                    protocol="single",
+                    source_scenario="SS",
                     ddl="T",
                     max_episodes=1,
                     safe_rl_enabled=True,
@@ -225,6 +226,17 @@ class ParameterizedTopKTests(unittest.TestCase):
                 )
 
             demo_kwargs = _environment_kwargs(demo, 1, 1)
+            self.assertEqual(
+                demo_kwargs["experiment_protocol_identity"],
+                demo.experiment_protocol,
+            )
+            self.assertEqual(demo_kwargs["scenario_code"], "SS")
+            self.assertEqual(demo_kwargs["task_code"], "S")
+            self.assertEqual(demo_kwargs["resource_code"], "S")
+            self.assertEqual(
+                tuple(demo_kwargs["workflow_families"]),
+                tuple(demo.workflow_families),
+            )
             demo_actions = load_manager_heuristic_library(
                 manifest,
                 include_traditional=not demo_kwargs[

@@ -103,6 +103,11 @@ def _environment_kwargs(cfg, workflow_seed, resource_seed):
         "manager_heuristic_llm_only": (
             cfg.safe_rl.manager_heuristics.llm_only
         ),
+        "experiment_protocol_identity": cfg.experiment_protocol,
+        "scenario_code": cfg.scenario,
+        "task_code": cfg.task_code,
+        "resource_code": cfg.res_code,
+        "workflow_families": cfg.workflow_families,
         "manager_heuristic_recent_window": (
             cfg.safe_rl.manager_heuristics.recent_window
         ),
@@ -190,7 +195,8 @@ def main(argv=None):
         )
 
     cfg = build_train_config(
-        scenario=args.scenario,
+        protocol="single",
+        source_scenario=args.scenario,
         ddl=args.ddl,
         max_episodes=1,
         safe_rl_enabled=True,
