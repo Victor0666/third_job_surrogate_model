@@ -62,7 +62,7 @@ def _metrics(*, feasible, energy, worst_violation=0.0):
         feasible_seed_rate=(1.0 if feasible else 0.8),
         worst_seed_violation=(0.0 if feasible else worst_violation),
         worst_seed_lateness=(0.0 if feasible else 2.0),
-        validation_seed_count=5,
+        validation_seed_count=3,
     )
 
 
@@ -181,7 +181,7 @@ class GlobalWorkerEnvironmentTests(unittest.TestCase):
 
 class GlobalWorkerConfigTests(unittest.TestCase):
     def test_protocol_seeds_and_network_sizes_are_frozen(self):
-        self.assertEqual(SAFE_HRL_VALIDATION_SEEDS, (101, 102, 103, 104, 105))
+        self.assertEqual(SAFE_HRL_VALIDATION_SEEDS, (101, 102, 103))
         self.assertEqual(FINAL_TEST_SEEDS, tuple(range(201, 231)))
         with patch("hrl_mix.train_config.os.makedirs"):
             config = build_train_config(

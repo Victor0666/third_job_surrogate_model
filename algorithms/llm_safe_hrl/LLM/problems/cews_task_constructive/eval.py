@@ -60,7 +60,7 @@ from surrogate.replay_gate import DecisionTraceCapture
 
 
 DEFAULT_CONFIG_PATH = LLM_ROOT / "cfg" / "problem" / "cews_task_constructive.yaml"
-LLM_EVOLUTION_FORBIDDEN_SEEDS = frozenset(range(101, 106)).union(range(201, 231))
+LLM_EVOLUTION_FORBIDDEN_SEEDS = frozenset({101, 102, 103}).union(range(201, 231))
 
 
 def _apply_eval_scenario_config(

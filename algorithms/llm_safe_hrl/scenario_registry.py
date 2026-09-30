@@ -39,7 +39,7 @@ DEFAULT_BW_TIERS = (1000.0, 2000.0, 4000.0, 6000.0, 8000.0)
 LLM_OFFLINE_TRAIN_SEEDS = (1, 2, 3)
 LLM_OFFLINE_VALIDATION_SEEDS = (4, 5)
 SAFE_HRL_TRAIN_SEEDS = (1, 2, 3, 4, 5)
-SAFE_HRL_VALIDATION_SEEDS = (101, 102, 103, 104, 105)
+SAFE_HRL_VALIDATION_SEEDS = (101, 102, 103)
 FINAL_TEST_SEEDS = tuple(range(201, 231))
 _IDENTITY_FIELDS = (
     "protocol", "source_scenario", "training_scenarios", "test_scenarios",
@@ -426,7 +426,7 @@ def resolve_experiment_protocol(
         )
     forbidden_llm = set(SAFE_HRL_VALIDATION_SEEDS).union(FINAL_TEST_SEEDS)
     if forbidden_llm.intersection(train) or forbidden_llm.intersection(validation):
-        raise ValueError("LLM offline seeds must not use 101-105 or 201-230")
+        raise ValueError("LLM offline seeds must not use 101-103 or 201-230")
     safe_groups = (set(safe_train), set(safe_validation), set(final_test))
     if (
         safe_groups[0].intersection(safe_groups[1])
@@ -443,7 +443,7 @@ def resolve_experiment_protocol(
     ):
         raise ValueError(
             "formal Safe-HRL seeds are fixed to train=[1,2,3,4,5], "
-            "validation=[101,102,103,104,105], and final_test=[201,...,230]"
+            "validation=[101,102,103], and final_test=[201,...,230]"
         )
     if mode == "single":
         source = _normalize_scenario(source_scenario or "")

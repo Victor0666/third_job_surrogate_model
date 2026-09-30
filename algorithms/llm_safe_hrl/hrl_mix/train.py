@@ -293,10 +293,10 @@ def main(argv=None):
     parser.add_argument(
         "--validation-workers",
         type=int,
-        default=5,
+        default=3,
         help=(
-            "Worker processes for periodic validation episodes. 5 "
-            "is the default for the five fixed validation seeds; 1 keeps "
+            "Worker processes for periodic validation episodes. 3 "
+            "is the default for the three fixed validation seeds; 1 keeps "
             "the serial path unchanged; 0 auto-selects "
             "cpu_count-2. Workers run on the same device as the parent, "
             "so validation results and best-checkpoint selection are "

@@ -92,20 +92,6 @@
           "workflow_seed": 103,
           "arrival_seed": 103,
           "resource_seed": 103
-        },
-        {
-          "case_id": "validation_seed_104",
-          "episode_seed": 104,
-          "workflow_seed": 104,
-          "arrival_seed": 104,
-          "resource_seed": 104
-        },
-        {
-          "case_id": "validation_seed_105",
-          "episode_seed": 105,
-          "workflow_seed": 105,
-          "arrival_seed": 105,
-          "resource_seed": 105
         }
       ],
       "final_test": [

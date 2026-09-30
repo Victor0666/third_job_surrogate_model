@@ -655,7 +655,7 @@ def train(
     protocol: str | None = None,
     source_scenario: str | None = None,
     resource_scale: str | None = None,
-    validation_workers: int = 5,
+    validation_workers: int = 3,
     safe_rl_lambda_lr: float = 0.05,
     safe_rl_predicted_violation_weight: float = 1.0,
     safe_rl_actual_violation_weight: float = 1.0,

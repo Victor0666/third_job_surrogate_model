@@ -277,14 +277,14 @@ def test_safe_hrl_single_config_uses_isolated_identity_and_paths(
         "llm_train_seeds": [1, 2, 3],
         "llm_validation_seeds": [4, 5],
         "safe_hrl_train_seeds": [1, 2, 3, 4, 5],
-        "safe_hrl_validation_seeds": [101, 102, 103, 104, 105],
+        "safe_hrl_validation_seeds": [101, 102, 103],
         "final_test_seeds": list(range(201, 231)),
     }
     assert config.source_scenario == source
     assert config.training_scenarios == (source,)
     assert config.test_scenarios == expected_tests
     assert config.train_seeds == (1, 2, 3, 4, 5)
-    assert config.validation_seeds == (101, 102, 103, 104, 105)
+    assert config.validation_seeds == (101, 102, 103)
     assert config.num_cloud_hosts == resource_hosts
     assert tuple(Path(path).name for path in config.dax_list) == (
         SCENARIO_REGISTRY[source].dax_files
@@ -314,7 +314,7 @@ def test_safe_hrl_multi_config_records_all_group_scenarios():
         "llm_train_seeds": [1, 2, 3],
         "llm_validation_seeds": [4, 5],
         "safe_hrl_train_seeds": [1, 2, 3, 4, 5],
-        "safe_hrl_validation_seeds": [101, 102, 103, 104, 105],
+        "safe_hrl_validation_seeds": [101, 102, 103],
         "final_test_seeds": list(range(201, 231)),
     }
     assert config.source_scenario is None
@@ -344,9 +344,7 @@ def test_safe_hrl_protocol_seeds_drive_training_and_validation():
 
     for config in (single, multi):
         assert config.random_seed == config.train_seeds[0] == 1
-        assert config.eval_seeds == config.validation_seeds == (
-            101, 102, 103, 104, 105
-        )
+        assert config.eval_seeds == config.validation_seeds == (101, 102, 103)
 
 
 def test_safe_hrl_multi_episode_rotation_covers_scenario_seed_product():
@@ -580,13 +578,13 @@ def test_safe_hrl_multi_validation_calls_every_training_scenario():
         )
 
     assert calls == [
-        ("SS", (101, 102, 103, 104, 105)),
-        ("MS", (101, 102, 103, 104, 105)),
-        ("LS", (101, 102, 103, 104, 105)),
+        ("SS", (101, 102, 103)),
+        ("MS", (101, 102, 103)),
+        ("LS", (101, 102, 103)),
     ]
     assert result[:3] == (2.0, 2.0, 2.0)
     assert result[3]["evaluation_scenarios"] == ["SS", "MS", "LS"]
-    assert result[3]["evaluation_seed_count"] == 15
+    assert result[3]["evaluation_seed_count"] == 9
     assert result[3]["all_seed_feasible"] is True
 
 
@@ -600,7 +598,7 @@ def test_pipeline_seed_split_cannot_bypass_protocol_identity():
 
     class Split:
         training = (1, 2, 3, 4, 5)
-        validation = (101, 102, 103, 104, 105)
+        validation = (101, 102, 103)
 
     class Plan:
         seed_split = Split()
