@@ -277,14 +277,14 @@ def test_safe_hrl_single_config_uses_isolated_identity_and_paths(
         "llm_train_seeds": [1, 2, 3],
         "llm_validation_seeds": [4, 5],
         "safe_hrl_train_seeds": [1, 2, 3, 4, 5],
-        "safe_hrl_validation_seeds": [101, 102, 103],
+        "safe_hrl_validation_seeds": [101, 102, 103, 104, 105],
         "final_test_seeds": list(range(201, 231)),
     }
     assert config.source_scenario == source
     assert config.training_scenarios == (source,)
     assert config.test_scenarios == expected_tests
     assert config.train_seeds == (1, 2, 3, 4, 5)
-    assert config.validation_seeds == (101, 102, 103)
+    assert config.validation_seeds == (101, 102, 103, 104, 105)
     assert config.num_cloud_hosts == resource_hosts
     assert tuple(Path(path).name for path in config.dax_list) == (
         SCENARIO_REGISTRY[source].dax_files
@@ -314,7 +314,7 @@ def test_safe_hrl_multi_config_records_all_group_scenarios():
         "llm_train_seeds": [1, 2, 3],
         "llm_validation_seeds": [4, 5],
         "safe_hrl_train_seeds": [1, 2, 3, 4, 5],
-        "safe_hrl_validation_seeds": [101, 102, 103],
+        "safe_hrl_validation_seeds": [101, 102, 103, 104, 105],
         "final_test_seeds": list(range(201, 231)),
     }
     assert config.source_scenario is None
@@ -344,7 +344,9 @@ def test_safe_hrl_protocol_seeds_drive_training_and_validation():
 
     for config in (single, multi):
         assert config.random_seed == config.train_seeds[0] == 1
-        assert config.eval_seeds == config.validation_seeds == (101, 102, 103)
+        assert config.eval_seeds == config.validation_seeds == (
+            101, 102, 103, 104, 105
+        )
 
 
 def test_safe_hrl_multi_episode_rotation_covers_scenario_seed_product():
@@ -556,13 +558,13 @@ def test_safe_hrl_multi_validation_calls_every_training_scenario():
                 "safety_cost": 0.0,
                 "seed": seed,
             })
-        return (ordinal,) * 4 + ({
+        return (ordinal,) * 3 + ({
             "per_seed_metrics": records,
             "evaluation_violation_budget": 0.0,
         },)
 
     with patch(
-        "hrl_mix.train_runner.evaluate_hrl_three_layer_multi_seed",
+        "hrl_mix.train_runner.evaluate_hrl_two_level_multi_seed",
         side_effect=fake_evaluate,
     ):
         result = _evaluate_training_scenarios(
@@ -572,19 +574,20 @@ def test_safe_hrl_multi_validation_calls_every_training_scenario():
             cfg=config,
             controller=None,
             vm_agent=object(),
-            host_agent=object(),
             manager_agent=object(),
             seeds=config.validation_seeds,
             return_safety_metrics=True,
         )
 
     assert calls == [
-        ("SS", (101, 102, 103)), ("MS", (101, 102, 103)), ("LS", (101, 102, 103))
+        ("SS", (101, 102, 103, 104, 105)),
+        ("MS", (101, 102, 103, 104, 105)),
+        ("LS", (101, 102, 103, 104, 105)),
     ]
-    assert result[:4] == (2.0, 2.0, 2.0, 2.0)
-    assert result[4]["evaluation_scenarios"] == ["SS", "MS", "LS"]
-    assert result[4]["evaluation_seed_count"] == 9
-    assert result[4]["all_seed_feasible"] is True
+    assert result[:3] == (2.0, 2.0, 2.0)
+    assert result[3]["evaluation_scenarios"] == ["SS", "MS", "LS"]
+    assert result[3]["evaluation_seed_count"] == 15
+    assert result[3]["all_seed_feasible"] is True
 
 
 def test_pipeline_seed_split_cannot_bypass_protocol_identity():
@@ -597,7 +600,7 @@ def test_pipeline_seed_split_cannot_bypass_protocol_identity():
 
     class Split:
         training = (1, 2, 3, 4, 5)
-        validation = (101, 102, 103)
+        validation = (101, 102, 103, 104, 105)
 
     class Plan:
         seed_split = Split()

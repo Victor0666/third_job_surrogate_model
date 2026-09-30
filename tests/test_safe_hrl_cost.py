@@ -128,6 +128,20 @@ class SafeWorkflowCostTests(unittest.TestCase):
         self.assertAlmostEqual(info["positive_delta_risk"], 0.2)
         self.assertAlmostEqual(info["safety_cost"], 0.1)
 
+    def test_action_specific_predicted_violation_enters_qc(self):
+        environment = _safety_stub(
+            deadline=10.0,
+            finish_tfn=None,
+            predicted_tfn=TriangularFuzzyNumber(5.0, 5.0, 5.0),
+        )
+        info = environment.get_safety_diagnostics(
+            risk_before=0.5,
+            predicted_violation_amount=150.0,
+        )
+        self.assertEqual(info["predicted_violation_amount"], 150.0)
+        self.assertEqual(info["predicted_violation_cost"], 0.5)
+        self.assertEqual(info["safety_cost"], 0.5)
+
     def test_completed_workflow_is_not_charged_twice(self):
         environment = _safety_stub(
             deadline=10.0,
@@ -160,9 +174,10 @@ class SafeRLBackwardCompatibilityTests(unittest.TestCase):
             1,
         )
         self.assertEqual(config.replay.near_boundary_margin, 1.0)
-        self.assertTrue(config.replay.host_use_per)
-        self.assertTrue(config.replay.vm_use_per)
+        self.assertTrue(config.replay.worker_use_per)
         self.assertFalse(config.replay.manager_use_per)
+        self.assertFalse(hasattr(config.replay, "host_use_per"))
+        self.assertFalse(hasattr(config.replay, "vm_use_per"))
         self.assertTrue(config.replay.combined_per_priority)
         self.assertEqual(config.replay.performance_td_weight, 1.0)
         self.assertEqual(config.replay.safety_td_weight, 1.0)

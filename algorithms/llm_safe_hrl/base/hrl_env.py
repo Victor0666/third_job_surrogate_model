@@ -1,8 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-hrl_env.py
+Manager -> Global Safe-VM Worker two-level HRL environment.
 
-三层智能体环境（阶段式 HRL + HostAgent + VMAgent）：
+The active Safe-HRL path lets Manager rank tasks and the global Worker select
+one VM directly. Host/VM staged methods remain only as deprecated legacy
+compatibility APIs for older callers.
 
 L1 Manager（阶段级）【动态权重增量控制】：
 - 维护 5 维 raw 权重 w_raw（FCFS/SJF/MCF/HUR/EDF）
@@ -22,8 +24,8 @@ Deadline 逻辑：
    - Manager state 的 slack 统计
    - workflow lateness 统计
 
-【本版本关键修改】
-中层/下层 reward 改为与 MARL 一致的口径：
+【Deprecated legacy compatibility semantics】
+以下 HostAgent/VMAgent reward 仅供旧分层接口兼容；新主路径使用 Global Worker：
 
 - HostAgent reward:
     r_host = (1-alpha_delay_host) * r_energy_total + alpha_delay_host * r_delay
@@ -118,6 +120,11 @@ def _clip01(x: float) -> float:
     if x > 1.0:
         return 1.0
     return float(x)
+
+
+def _signed_log1p(x: float) -> float:
+    value = float(x)
+    return float(np.sign(value) * np.log1p(abs(value)))
 
 
 def _clip01_numpy_exact(x: float) -> float:
@@ -326,7 +333,7 @@ def _heft_makespan_and_finish_times(tasks, vm_pc, vm_bw_bps):
 
 
 class HrlHeftEnv(gym.Env):
-    """基于 HEFT 期限估计的三层分阶段调度环境"""
+    """Manager/Global Safe-VM Worker 两层环境，含旧分层兼容接口。"""
 
     metadata = {"render.modes": ["human"]}
 
@@ -363,7 +370,8 @@ class HrlHeftEnv(gym.Env):
         safe_rl_process_risk_aggregation="mean",
         safe_rl_lateness_normalizer=300.0,
         safe_rl_lateness_clip=5.0,
-        safe_rl_delta_risk_weight=0.5,
+        safe_rl_delta_risk_weight=0.1,
+        safe_rl_predicted_violation_weight=1.0,
         safe_rl_violation_weight=1.0,
         safe_rl_lateness_weight=1.0,
         safe_rl_shield_enabled=False,
@@ -417,6 +425,9 @@ class HrlHeftEnv(gym.Env):
         )
         self.safe_rl_delta_risk_weight = float(
             safe_rl_delta_risk_weight
+        )
+        self.safe_rl_predicted_violation_weight = float(
+            safe_rl_predicted_violation_weight
         )
         self.safe_rl_violation_weight = float(
             safe_rl_violation_weight
@@ -526,6 +537,10 @@ class HrlHeftEnv(gym.Env):
             (
                 "safe_rl_delta_risk_weight",
                 self.safe_rl_delta_risk_weight,
+            ),
+            (
+                "safe_rl_predicted_violation_weight",
+                self.safe_rl_predicted_violation_weight,
             ),
             (
                 "safe_rl_violation_weight",
@@ -922,11 +937,34 @@ class HrlHeftEnv(gym.Env):
         )
         self.vm_act_dim = self.max_vms_per_host
 
+        # Safe-HRL 的唯一 Worker 动作空间是稳定的全局 VM 顺序。Host 特征
+        # 仍作为每个 VM 的上下文进入 observation，但不再构成动作层。
+        self.global_vm_task_feature_dim = 8
+        self.global_vm_feature_dim = 15
+        self.global_vm_obs_dim = int(
+            self.manager_obs_dim
+            + self.global_vm_task_feature_dim
+            + self.num_vms * self.global_vm_feature_dim
+        )
+        self.global_vm_act_dim = int(self.num_vms)
+
         self.observation_space = spaces.Dict({
             "host_obs": spaces.Box(low=-np.inf, high=np.inf, shape=(self.host_obs_dim,), dtype=np.float32),
             "host_mask": spaces.Box(low=0.0, high=1.0, shape=(self.host_act_dim,), dtype=np.float32),
             "vm_obs": spaces.Box(low=-np.inf, high=np.inf, shape=(self.vm_obs_dim,), dtype=np.float32),
             "vm_mask": spaces.Box(low=0.0, high=1.0, shape=(self.vm_act_dim,), dtype=np.float32),
+            "global_vm_obs": spaces.Box(
+                low=-np.inf,
+                high=np.inf,
+                shape=(self.global_vm_obs_dim,),
+                dtype=np.float32,
+            ),
+            "global_vm_mask": spaces.Box(
+                low=0.0,
+                high=1.0,
+                shape=(self.global_vm_act_dim,),
+                dtype=np.float32,
+            ),
         })
 
         # 能耗记录和分主机增量能耗缓存
@@ -1061,7 +1099,7 @@ class HrlHeftEnv(gym.Env):
         ]
 
     def get_observation_schema(self, layer=None):
-        """返回三层 observation 的维度、扩展顺序和归一化范围。"""
+        """返回两层主路径及 deprecated Host/VM 接口的 observation schema。"""
         if self.manager_mode == HEURISTIC_SELECTION_MODE:
             manager_meta = {
                 "legacy_dim": int(self.manager_system_obs_dim),
@@ -1144,9 +1182,45 @@ class HrlHeftEnv(gym.Env):
                     "order; padding slots are zero and no VM ID feature"
                 ),
             },
+            "worker": {
+                "legacy_dim": 0,
+                "repeat_count": int(self.num_vms),
+                "safe_feature_dim_per_item": int(
+                    self.global_vm_feature_dim
+                ),
+                "total_dim": int(self.global_vm_obs_dim),
+                "safe_features": [
+                    "idle",
+                    "available_delay",
+                    "compute",
+                    "bandwidth",
+                    "predicted_exec_time",
+                    "predicted_comm_time",
+                    "fuzzy_marginal_energy",
+                    "owning_host_load",
+                    "owning_host_capacity",
+                    "owning_host_idle_ratio",
+                    "owning_host_running_ratio",
+                    "owning_host_available_delay",
+                    "predicted_safety_risk",
+                    "safety_margin",
+                    "predicted_violation_amount",
+                ],
+                "action_dim": int(self.global_vm_act_dim),
+                "action_type": "global_vm_index",
+                "layout": (
+                    "manager/global system features + 8 current-task "
+                    "features + 15 features per global VM"
+                ),
+            },
         }
         for layer_name, value in layer_meta.items():
-            if (
+            if layer_name == "worker":
+                safe_extension_dim = int(
+                    self.num_vms * self.global_vm_feature_dim
+                )
+                schema_version = "global_safe_vm_worker_v1"
+            elif (
                 layer_name == "manager"
                 and self.manager_mode == HEURISTIC_SELECTION_MODE
             ):
@@ -1182,7 +1256,7 @@ class HrlHeftEnv(gym.Env):
         key = str(layer).strip().lower()
         if key not in layer_meta:
             raise ValueError(
-                "layer must be 'manager', 'host', or 'vm'"
+                "layer must be 'manager', 'worker', 'host', or 'vm'"
             )
         return layer_meta[key]
 
@@ -1469,6 +1543,29 @@ class HrlHeftEnv(gym.Env):
                 )
         return vector
 
+    def _host_runtime_load_and_running_ratio(self, host_id, now=None):
+        """Shared Manager/Worker Host utilization semantics."""
+        now = float(self.current_time if now is None else now)
+        indices = self.host_to_vm_indices[int(host_id)]
+        running_indices = [
+            index
+            for index in indices
+            if float(self.vm_available_at[index]) > now + 1e-12
+        ]
+        active_pc = sum(
+            float(self.vms[self.vm_ids[index]].pc)
+            for index in running_indices
+        )
+        return (
+            _clip01(
+                _safe_div(
+                    active_pc,
+                    max(float(self.hosts[host_id].total_pc), 1e-9),
+                )
+            ),
+            _clip01(_safe_div(len(running_indices), max(len(indices), 1))),
+        )
+
     def get_manager_state(self):
         """构造当前 Manager 模式所需的全局与规则状态。"""
         now = getattr(self, "current_time", 0.0)
@@ -1490,20 +1587,11 @@ class HrlHeftEnv(gym.Env):
 
         host_load_list, host_running_ratio_list = [], []
         for h in self.host_ids:
-            active_pc = 0.0
-            running = 0
-            cnt = 0
-            soonest = None
-            for j, vid in enumerate(self.vm_ids):
-                if self.vms[vid].host_id == h:
-                    cnt += 1
-                    if self.vm_available_at[j] > now + 1e-12:
-                        active_pc += self.vms[vid].pc
-                        running += 1
-                    if soonest is None or self.vm_available_at[j] < soonest:
-                        soonest = self.vm_available_at[j]
-            host_load_list.append(_safe_div(active_pc, max(self.hosts[h].total_pc, 1e-9)))
-            host_running_ratio_list.append(_safe_div(running, max(cnt, 1)))
+            host_load, host_running_ratio = (
+                self._host_runtime_load_and_running_ratio(h, now)
+            )
+            host_load_list.append(host_load)
+            host_running_ratio_list.append(host_running_ratio)
 
         host_load_mean = float(np.mean(host_load_list)) if host_load_list else 0.0
         host_running_ratio_mean = float(np.mean(host_running_ratio_list)) if host_running_ratio_list else 0.0
@@ -2010,6 +2098,8 @@ class HrlHeftEnv(gym.Env):
         """返回字段稳定的零安全代价信息。"""
         return {
             "safety_cost": 0.0,
+            "predicted_violation_cost": 0.0,
+            "predicted_violation_amount": 0.0,
             "positive_delta_risk": 0.0,
             "normalized_lateness": 0.0,
             "violation_cost": 0.0,
@@ -2093,6 +2183,7 @@ class HrlHeftEnv(gym.Env):
                 getattr(self, "safe_rl_enabled", False)
             ),
             "safety_cost_aggregation": (
+                "predicted_violation_weight * predicted_violation_cost + "
                 "delta_risk_weight * positive_delta_risk + "
                 "violation_weight * violation_cost + "
                 "lateness_weight * normalized_lateness"
@@ -3243,6 +3334,7 @@ class HrlHeftEnv(gym.Env):
         self,
         *,
         risk_before: float | None = None,
+        predicted_violation_amount: float = 0.0,
     ) -> dict:
         """返回本次转换的独立安全代价和可累计诊断指标。
 
@@ -3318,7 +3410,18 @@ class HrlHeftEnv(gym.Env):
             raise ValueError("risk_before must be finite")
         positive_delta_risk = max(0.0, risk_after - risk_before)
         all_rows = workflow_safety + unfinished_rows
+        predicted_violation_amount = max(
+            0.0, float(predicted_violation_amount)
+        )
+        predicted_violation_cost = min(
+            predicted_violation_amount
+            / self.safe_rl_lateness_normalizer,
+            self.safe_rl_lateness_clip,
+        )
         safety_cost = (
+            getattr(self, "safe_rl_predicted_violation_weight", 1.0)
+            * float(predicted_violation_cost)
+            +
             self.safe_rl_delta_risk_weight
             * float(positive_delta_risk)
             + self.safe_rl_violation_weight
@@ -3359,6 +3462,12 @@ class HrlHeftEnv(gym.Env):
         info.update(
             {
                 "safety_cost": float(safety_cost),
+                "predicted_violation_cost": float(
+                    predicted_violation_cost
+                ),
+                "predicted_violation_amount": float(
+                    predicted_violation_amount
+                ),
                 "positive_delta_risk": float(positive_delta_risk),
                 "normalized_lateness": float(normalized_lateness),
                 "violation_cost": float(violation_cost),
@@ -4012,7 +4121,7 @@ class HrlHeftEnv(gym.Env):
         task,
         candidate_vm_ids=None,
     ):
-        """按 Manager -> Host -> VM 的层次形态执行同一条固定规则。
+        """Deprecated legacy Manager -> Host -> VM fixed-rule adapter.
 
         返回 ``(host_id, vm_id, details)``。候选打分、按时/延期分组与排序键
         全部复用 ``select_vm_deterministic`` 的实现，随后把存活候选按 Host
@@ -4228,6 +4337,12 @@ class HrlHeftEnv(gym.Env):
             row = vm_prediction_by_id.get(int(vm_id), {})
             global_vm_metrics.append(
                 {
+                    "fuzzy_marginal_energy": float(
+                        self.estimate_incremental_energy_score(
+                            task_id,
+                            vm_id,
+                        )
+                    ),
                     "predicted_risk": float(
                         row.get("risk_finish", 0.0)
                     ),
@@ -4270,7 +4385,7 @@ class HrlHeftEnv(gym.Env):
         fallback_candidates = []
         if (
             self.safe_rl_shield_enabled
-            and host_masks["safe_action_count"] == 0
+            and vm_masks["safe_action_count"] == 0
         ):
             # 只在真实空安全集时计算模糊边际能耗，避免正常安全动作路径引入
             # 额外排序或改变 RL 的选择语义。
@@ -4293,10 +4408,9 @@ class HrlHeftEnv(gym.Env):
                             row["predicted_violation_amount"]
                         ),
                         "fuzzy_marginal_energy": float(
-                            self.estimate_incremental_energy_score(
-                                task_id,
-                                vm_id,
-                            )
+                            global_vm_metrics[vm_index][
+                                "fuzzy_marginal_energy"
+                            ]
                         ),
                         "risk_finish": float(row["risk_finish"]),
                     }
@@ -4304,7 +4418,7 @@ class HrlHeftEnv(gym.Env):
 
         fallback_record = self.safety_fallback_controller.select(
             fallback_candidates,
-            safe_action_count=int(host_masks["safe_action_count"]),
+            safe_action_count=int(vm_masks["safe_action_count"]),
             fallback_reason="empty_safe_action_set",
         )
         fallback_vm_id = fallback_record["selected_vm"]
@@ -4760,22 +4874,31 @@ class HrlHeftEnv(gym.Env):
             if records is None
             else list(records)
         )
+        record_count = int(len(selected_records))
+        intervention_count = int(
+            sum(
+                bool(record.get("shield_intervened", False))
+                for record in selected_records
+            )
+        )
+        fallback_count = int(
+            sum(
+                bool(record.get("fallback_applied", False))
+                for record in selected_records
+            )
+        )
         return {
             "safety_shield_enabled": bool(
                 self.safe_rl_shield_enabled
             ),
-            "shield_record_count": int(len(selected_records)),
-            "shield_intervention_count": int(
-                sum(
-                    bool(record.get("shield_intervened", False))
-                    for record in selected_records
-                )
+            "shield_record_count": record_count,
+            "shield_intervention_count": intervention_count,
+            "shield_intervention_rate": float(
+                intervention_count / max(record_count, 1)
             ),
-            "shield_fallback_count": int(
-                sum(
-                    bool(record.get("fallback_applied", False))
-                    for record in selected_records
-                )
+            "shield_fallback_count": fallback_count,
+            "fallback_rate": float(
+                fallback_count / max(record_count, 1)
             ),
             "host_action_modified_count": int(
                 sum(
@@ -4786,7 +4909,14 @@ class HrlHeftEnv(gym.Env):
             ),
             "vm_action_modified_count": int(
                 sum(
-                    record.get("layer") == "vm"
+                    record.get("layer") in {"vm", "global_vm_worker"}
+                    and bool(record.get("action_modified", False))
+                    for record in selected_records
+                )
+            ),
+            "worker_action_modified_count": int(
+                sum(
+                    record.get("layer") == "global_vm_worker"
                     and bool(record.get("action_modified", False))
                     for record in selected_records
                 )
@@ -4916,8 +5046,177 @@ class HrlHeftEnv(gym.Env):
         )
         return info
 
+    def _begin_global_worker_assignment(self) -> bool:
+        """Select the next Manager-ranked task without creating a Host action."""
+        if self.done_flag:
+            return False
+        if not self._phase_started:
+            self._phase_prepare_tasks()
+            self._phase_started = True
+            self._phase_assign_cnt = 0
+            self._phase_assigned_tids = []
+            self._phase_size_sum_mi = 0.0
+            self._phase_preadvanced = False
+            self._phase_preadvance_r_energy_total = 0.0
+            self._phase_preadvance_r_energy_by_host = {
+                int(host_id): 0.0 for host_id in self.host_ids
+            }
+            self._phase_performance_reward = 0.0
+            self._phase_performance_energy_delta = 0.0
+            self._phase_heuristic_safety_cost = 0.0
+            self._phase_safety_shield_records = []
+        if not self._has_decision_point() or not self._phase_tasks:
+            return False
+        if getattr(self, "_cur_tid", None) is None:
+            self._cur_tid = int(self._phase_tasks.pop(0))
+        self._cur_host_id = None
+        self._current_host_shield_decision = None
+        context = self.get_task_safety_action_masks(self._cur_tid)
+        legal = np.asarray(
+            context["vm_masks_global"]["legal_action_mask"],
+            dtype=np.float32,
+        )
+        if not np.any(legal > 0.5):
+            self._phase_tasks.insert(0, int(self._cur_tid))
+            self._cur_tid = None
+            self._current_safety_shield_context = None
+            return False
+        self._current_safety_shield_context = context
+        return True
+
+    def _global_worker_observation(self) -> np.ndarray:
+        task_id = int(self._cur_tid)
+        context = self._current_safety_shield_context
+        task_features = self.build_task_features([task_id])
+        task_names = (
+            "min_exec_time",
+            "min_comm_time",
+            "min_incremental_energy",
+            "slack",
+            "upward_rank",
+            "remaining_work",
+            "ready_wait_time",
+            "uncertainty",
+        )
+        task_vector = np.asarray(
+            [_signed_log1p(task_features[name][0]) for name in task_names],
+            dtype=np.float32,
+        )
+        now = float(self.current_time)
+        horizon = max(float(self.horizon), 1e-9)
+        budget = max(self._workflow_budget_for_task(task_id), 1e-9)
+        mean_pc = max(
+            float(np.mean([float(self.vms[vm_id].pc) for vm_id in self.vm_ids])),
+            1e-9,
+        )
+        mean_bw = max(
+            float(np.mean([float(self.vms[vm_id].bw) for vm_id in self.vm_ids])),
+            1e-9,
+        )
+        host_capacity = {
+            int(host_id): sum(
+                float(self.vms[self.vm_ids[index]].pc)
+                for index in self.host_to_vm_indices[host_id]
+            )
+            for host_id in self.host_ids
+        }
+        max_host_capacity = max(host_capacity.values(), default=1.0)
+        rows = []
+        for index, vm_id in enumerate(self.vm_ids):
+            vm = self.vms[vm_id]
+            host_id = int(vm.host_id)
+            host_indices = self.host_to_vm_indices[host_id]
+            delays = [
+                max(0.0, float(self.vm_available_at[item]) - now)
+                for item in host_indices
+            ]
+            running = sum(delay > 1e-9 for delay in delays)
+            host_load, host_running_ratio = (
+                self._host_runtime_load_and_running_ratio(host_id, now)
+            )
+            idle_ratio = (len(host_indices) - running) / max(len(host_indices), 1)
+            metric = context["global_vm_metrics"][index]
+            energy = float(metric["fuzzy_marginal_energy"])
+            rows.extend(
+                (
+                    1.0 if delays[host_indices.index(index)] <= 1e-9 else 0.0,
+                    _clip01(delays[host_indices.index(index)] / horizon),
+                    float(vm.pc) / mean_pc,
+                    float(vm.bw) / mean_bw,
+                    _signed_log1p(self.estimate_exec_time(task_id, vm_id)),
+                    _signed_log1p(self.estimate_comm_time(task_id, vm_id)),
+                    _signed_log1p(energy),
+                    float(host_load),
+                    float(host_capacity[host_id] / max(max_host_capacity, 1e-9)),
+                    float(idle_ratio),
+                    float(host_running_ratio),
+                    _clip01(float(np.mean(delays)) / horizon),
+                    _clip01(max(0.0, metric["predicted_risk"] - now) / budget),
+                    float(np.clip(metric["safety_margin"] / budget, -1.0, 1.0)),
+                    _clip01(metric["predicted_violation_amount"] / budget),
+                )
+            )
+        observation = np.concatenate(
+            (
+                np.asarray(self.get_manager_state(), dtype=np.float32),
+                task_vector,
+                np.asarray(rows, dtype=np.float32),
+            )
+        ).astype(np.float32)
+        if observation.shape != (self.global_vm_obs_dim,):
+            raise RuntimeError("global Worker observation dimension mismatch")
+        if not np.all(np.isfinite(observation)):
+            raise ValueError("global Worker observation contains NaN or infinity")
+        return observation
+
+    def get_global_vm_state_for_current_task(self):
+        """Return the Manager-ranked task state and global Safe-VM mask."""
+        if not self._begin_global_worker_assignment():
+            return {
+                "obs": np.zeros(self.global_vm_obs_dim, np.float32),
+                "mask": np.zeros(self.global_vm_act_dim, np.float32),
+            }, False
+        context = self._current_safety_shield_context
+        masks = context["vm_masks_global"]
+        state = self._layer_state_with_safety_masks(
+            self._global_worker_observation(),
+            masks,
+        )
+        state.update(
+            {
+                "fallback_action": context["fallback_vm_global_index"],
+                "observation_schema_version": "global_safe_vm_worker_v1",
+                "legal_vm_count": int(np.sum(masks["legal_action_mask"])),
+                "safe_vm_count": int(np.sum(masks["safe_legal_action_mask"])),
+                "safe_action_ratio": float(
+                    np.sum(masks["safe_legal_action_mask"])
+                    / max(np.sum(masks["legal_action_mask"]), 1.0)
+                ),
+            }
+        )
+        return state, True
+
+    def global_vm_assign(self, global_vm_index: int, action_selection=None):
+        """Assign the current task by global VM index; Host is derived from VM."""
+        if self._current_safety_shield_context is None:
+            raise RuntimeError(
+                "call get_global_vm_state_for_current_task() before assignment"
+            )
+        self._global_vm_action_mode = True
+        try:
+            _legacy_host_reward, worker_reward, info = self.vm_assign(
+                global_vm_index,
+                action_selection=action_selection,
+            )
+        finally:
+            self._global_vm_action_mode = False
+        info["reward_worker"] = float(worker_reward)
+        info["worker_action"] = int(info.get("executed_action", global_vm_index))
+        info["worker_action_type"] = "global_vm_index"
+        return float(worker_reward), info
+
     def get_host_state_for_next_assignment(self):
-        """取出阶段内下一个任务并构造 HostAgent 状态与动作掩码"""
+        """Deprecated legacy staged API: build the old Host-agent state."""
         if self.done_flag:
             return {
                 "obs": np.zeros(self.host_obs_dim, np.float32),
@@ -5016,7 +5315,7 @@ class HrlHeftEnv(gym.Env):
         host_index: int,
         action_selection=None,
     ):
-        """记录 HostAgent 选择并校验目标主机是否存在空闲 VM"""
+        """Deprecated legacy staged API: record an old Host-agent choice."""
         assert hasattr(self, "_cur_tid") and self._cur_tid is not None, "请先调用 get_host_state_for_next_assignment()"
         proposed_hi = int(host_index)
         context = self._current_safety_shield_context
@@ -5066,7 +5365,7 @@ class HrlHeftEnv(gym.Env):
         self._current_host_shield_decision = dict(decision)
 
     def get_vm_state_for_current_task(self):
-        """为当前任务和已选主机构造 VMAgent 状态与动作掩码"""
+        """Deprecated legacy staged API: build an old per-host VM state."""
         if self.done_flag:
             return {
                 "obs": np.zeros(self.vm_obs_dim, np.float32),
@@ -5187,16 +5486,23 @@ class HrlHeftEnv(gym.Env):
     ):
         """将当前任务分配到指定 VM 槽位并计算 Host 与 VM 奖励"""
         assert hasattr(self, "_cur_tid") and self._cur_tid is not None, "请先调用 get_host_state_for_next_assignment()"
-        assert self._cur_host_id is not None, "请先调用 host_select()"
+        global_action_mode = bool(
+            getattr(self, "_global_vm_action_mode", False)
+        )
+        if not global_action_mode:
+            assert self._cur_host_id is not None, "请先调用 host_select()"
 
         tid = int(self._cur_tid)
-        host_id = int(self._cur_host_id)
 
         proposed_slot = int(vm_slot_index)
         context = self._current_safety_shield_context
         if context is None:
             raise RuntimeError("Missing safety shield context")
-        if "current_vm_masks" not in context:
+        if global_action_mode:
+            current_vm_masks = context["vm_masks_global"]
+            current_vm_metrics = context["global_vm_metrics"]
+            fallback_vm_action = context["fallback_vm_global_index"]
+        elif "current_vm_masks" not in context:
             _, vm_state_available = (
                 self.get_vm_state_for_current_task()
             )
@@ -5204,12 +5510,19 @@ class HrlHeftEnv(gym.Env):
                 raise RuntimeError(
                     "Current host has no hard-legal VM action"
                 )
+            current_vm_masks = context["current_vm_masks"]
+            current_vm_metrics = context["current_vm_metrics"]
+            fallback_vm_action = context["fallback_vm_slot"]
+        else:
+            current_vm_masks = context["current_vm_masks"]
+            current_vm_metrics = context["current_vm_metrics"]
+            fallback_vm_action = context["fallback_vm_slot"]
         vm_decision = self.safety_shield.resolve_action(
             proposed_slot,
-            context["current_vm_masks"],
-            action_metrics=context["current_vm_metrics"],
-            fallback_action=context["fallback_vm_slot"],
-            layer="vm",
+            current_vm_masks,
+            action_metrics=current_vm_metrics,
+            fallback_action=fallback_vm_action,
+            layer=("global_vm_worker" if global_action_mode else "vm"),
         )
         self._attach_fallback_record(vm_decision, context)
         self._attach_action_selection(
@@ -5227,7 +5540,10 @@ class HrlHeftEnv(gym.Env):
             vm_decision = self._record_safety_shield_decision(
                 vm_decision
             )
-        if slot < 0 or slot >= self.max_vms_per_host:
+        action_dim = (
+            self.num_vms if global_action_mode else self.max_vms_per_host
+        )
+        if slot < 0 or slot >= action_dim:
             r_host = -1.0
             r_vm = -1.0
             info = {
@@ -5251,8 +5567,13 @@ class HrlHeftEnv(gym.Env):
             self._current_safety_shield_context = None
             return float(r_host), float(r_vm), info
 
+        host_id = (
+            int(self.vms[self.vm_ids[slot]].host_id)
+            if global_action_mode
+            else int(self._cur_host_id)
+        )
         vm_list = self.host_to_vm_indices[host_id]
-        if slot >= len(vm_list):
+        if not global_action_mode and slot >= len(vm_list):
             r_host = -1.0
             r_vm = -1.0
             info = {
@@ -5276,7 +5597,10 @@ class HrlHeftEnv(gym.Env):
             self._current_safety_shield_context = None
             return float(r_host), float(r_vm), info
 
-        vm_global_idx = int(vm_list[slot])
+        vm_global_idx = (
+            int(slot) if global_action_mode else int(vm_list[slot])
+        )
+        self._cur_host_id = int(host_id)
 
         now = self.current_time
         if self.vm_available_at[vm_global_idx] > now + 1e-9:
@@ -5428,8 +5752,33 @@ class HrlHeftEnv(gym.Env):
             )
         info.update(
             self.get_safety_diagnostics(
-                risk_before=process_risk_before_action
+                risk_before=process_risk_before_action,
+                predicted_violation_amount=float(
+                    vm_decision.get(
+                        "predicted_violation_amount",
+                        0.0,
+                    )
+                ),
             )
+        )
+        selected_metric = context["global_vm_metrics"][vm_global_idx]
+        info.update(
+            {
+                "selected_vm_predicted_violation": float(
+                    selected_metric["predicted_violation_amount"]
+                ),
+                "selected_vm_safety_margin": float(
+                    selected_metric["safety_margin"]
+                ),
+                "selected_vm_marginal_fuzzy_energy": float(
+                    selected_metric["fuzzy_marginal_energy"]
+                ),
+                "worker_action_type": (
+                    "global_vm_index"
+                    if global_action_mode
+                    else "host_local_vm_slot"
+                ),
+            }
         )
         if self.manager_mode == HEURISTIC_SELECTION_MODE:
             self._phase_heuristic_safety_cost += float(
@@ -6614,7 +6963,7 @@ class HrlHeftEnv(gym.Env):
         return host_block
 
     def _build_host_obs_for_task(self, tid: int):
-        """拼接 HostAgent 观测并标记具有空闲 VM 的可选主机"""
+        """Deprecated legacy helper for the staged Host-agent API."""
         block1, in_bits, out_bits, mi = self._compute_block1(tid)
         block2 = self._compute_block2()
         host_block = self._compute_host_block()
@@ -6644,7 +6993,7 @@ class HrlHeftEnv(gym.Env):
         return obs, mask
 
     def _build_vm_obs_for_task_host(self, tid: int, host_id: int):
-        """拼接 VMAgent 观测并标记目标主机上的空闲 VM 槽位"""
+        """Deprecated legacy helper for the per-host VM-agent API."""
         version = int(getattr(self, "_safety_state_version", 0))
         cached = getattr(self, "_host_vm_observation_cache", None)
         stats = getattr(self, "_simulator_cache_stats", None)
@@ -7336,12 +7685,14 @@ class HrlFcfsCacheEnv(HrlHeftEnv):
         return added
 
 
-# 保留旧名称供当前 HRL Mix 训练和评估代码兼容使用
+# Active two-level Safe-HRL name plus deprecated legacy import alias.
+GlobalSafeVMEnv = HrlFcfsCacheEnv
 CloudWorkflowEnv_VMAgents = HrlFcfsCacheEnv
 
 __all__ = [
     "HrlHeftEnv",
     "HrlFcfsCacheEnv",
+    "GlobalSafeVMEnv",
     "CloudWorkflowEnv_VMAgents",
     "MANAGER_ACTION_TABLE",
     "NoFeasibleVMError",

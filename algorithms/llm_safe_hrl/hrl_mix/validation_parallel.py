@@ -94,7 +94,7 @@ class AgentReplicaSpec:
         )
 
 
-_LAYERS = ("vm", "host", "manager")
+_LAYERS = ("worker", "manager")
 
 
 def _agent_weights(agent: D3QNAgent) -> dict:
@@ -179,8 +179,7 @@ def _run_seed_job(payload):
     result = evaluate_one_seed(
         _WORKER_STATE["env_cls"],
         env_kwargs,
-        agents["vm"],
-        agents["host"],
+        agents["worker"],
         agents["manager"],
         seed,
         return_safety_metrics=return_safety_metrics,
@@ -213,8 +212,7 @@ class ValidationEvaluationPool:
     def __init__(
         self,
         env_cls,
-        vm_agent,
-        host_agent,
+        worker_agent,
         manager_agent,
         *,
         workers,
@@ -223,8 +221,7 @@ class ValidationEvaluationPool:
     ):
         self._env_cls = env_cls
         self._agents = {
-            "vm": vm_agent,
-            "host": host_agent,
+            "worker": worker_agent,
             "manager": manager_agent,
         }
         self._device = str(device)
@@ -321,8 +318,7 @@ class ValidationEvaluationPool:
                 evaluate_one_seed(
                     self._env_cls,
                     env_kwargs,
-                    self._agents["vm"],
-                    self._agents["host"],
+                    self._agents["worker"],
                     self._agents["manager"],
                     seed,
                     return_safety_metrics=bool(return_safety_metrics),

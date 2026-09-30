@@ -26,7 +26,7 @@ from algorithms.llm_safe_hrl.scenario_registry import (
     resolve_experiment_protocol,
 )
 from base.d3qn_agent import D3QNAgent
-from base.hrl_env import CloudWorkflowEnv_VMAgents
+from base.hrl_env import GlobalSafeVMEnv
 from base.manager_heuristics import load_manager_heuristic_library
 from hrl_mix.model_selection import read_best_checkpoint_manifest
 from hrl_mix.train_config import (
@@ -35,7 +35,7 @@ from hrl_mix.train_config import (
     parse_deadline_cache_overrides,
     validate_single_deadline_cache_paths,
 )
-from hrl_mix.train_eval import evaluate_hrl_three_layer_multi_seed
+from hrl_mix.train_eval import evaluate_hrl_two_level_multi_seed
 
 
 DEFAULT_FINAL_TEST_SEEDS = tuple(range(201, 231))
@@ -113,20 +113,19 @@ def _append_seed_result(
 
     result = _json_value(seed_result)
 
-    if not isinstance(result, list) or len(result) < 4:
+    if not isinstance(result, list) or len(result) < 3:
         raise ValueError(
             "unexpected single-seed evaluation result"
         )
 
-    avg_vm = result[0]
-    avg_host = result[1]
-    avg_manager = result[2]
-    total_energy = result[3]
+    avg_worker = result[0]
+    avg_manager = result[1]
+    total_energy = result[2]
 
     safety = {}
 
-    if len(result) >= 5 and isinstance(result[4], Mapping):
-        safety = result[4]
+    if len(result) >= 4 and isinstance(result[3], Mapping):
+        safety = result[3]
 
     # ============================================================
     # JSONL
@@ -139,8 +138,7 @@ def _append_seed_result(
     json_record = {
         "scenario": str(scenario),
         "seed": int(seed),
-        "avg_vm_reward": avg_vm,
-        "avg_host_reward": avg_host,
+        "avg_worker_reward": avg_worker,
         "avg_manager_reward": avg_manager,
         "total_energy": total_energy,
         "safety_metrics": safety,
@@ -167,8 +165,7 @@ def _append_seed_result(
     csv_fields = [
         "scenario",
         "seed",
-        "avg_vm_reward",
-        "avg_host_reward",
+        "avg_worker_reward",
         "avg_manager_reward",
         "total_energy",
         "deadline_violation_rate",
@@ -187,8 +184,7 @@ def _append_seed_result(
     csv_row = {
         "scenario": str(scenario),
         "seed": int(seed),
-        "avg_vm_reward": avg_vm,
-        "avg_host_reward": avg_host,
+        "avg_worker_reward": avg_worker,
         "avg_manager_reward": avg_manager,
         "total_energy": total_energy,
         "deadline_violation_rate": safety.get(
@@ -618,8 +614,11 @@ def build_frozen_scenario_env_kwargs(
         "safe_rl_delta_risk_weight": float(
             safe.get(
                 "delta_risk_weight",
-                0.5,
+                0.1,
             )
+        ),
+        "safe_rl_predicted_violation_weight": float(
+            safe.get("predicted_violation_weight", 1.0)
         ),
         "safe_rl_violation_weight": float(
             safe.get(
@@ -1049,18 +1048,17 @@ def evaluate_frozen_protocol_scenarios(
     test_seeds: Sequence[int] = DEFAULT_FINAL_TEST_SEEDS,
     deadline_cache_overrides: Mapping[str, str] | None = None,
     progress_output_dir: str | os.PathLike[str] | None = None,
-    env_cls=CloudWorkflowEnv_VMAgents,
-    evaluator=evaluate_hrl_three_layer_multi_seed,
+    env_cls=GlobalSafeVMEnv,
+    evaluator=evaluate_hrl_two_level_multi_seed,
 ) -> dict[str, Any]:
     """Evaluate every protocol test scenario without mutating agents."""
 
     if set(agents) != {
         "manager",
-        "host",
-        "vm",
+        "worker",
     }:
         raise ValueError(
-            "frozen evaluation requires manager/host/vm agents"
+            "frozen evaluation requires manager/worker agents"
         )
 
     seeds = _normalize_test_seeds(
@@ -1159,8 +1157,7 @@ def evaluate_frozen_protocol_scenarios(
         result = evaluator(
             env_cls,
             env_kwargs,
-            agents["vm"],
-            agents["host"],
+            agents["worker"],
             agents["manager"],
             seeds,
             **evaluator_kwargs,
@@ -1414,8 +1411,7 @@ def run_frozen_protocol_evaluation(
         )
         for layer in (
             "manager",
-            "host",
-            "vm",
+            "worker",
         )
     }
 

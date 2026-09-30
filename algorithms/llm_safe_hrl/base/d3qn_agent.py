@@ -124,6 +124,8 @@ class D3QNAgent:
         safe_per_combined_priority: bool = False,
         safe_per_performance_td_weight: float = 1.0,
         safe_per_safety_td_weight: float = 1.0,
+        safe_per_ema_decay: float = 0.99,
+        safe_per_ema_epsilon: float = 1e-6,
     ):
         self.input_dim = int(input_dim)
         self.output_dim = int(output_dim)
@@ -154,6 +156,11 @@ class D3QNAgent:
         self.safe_per_safety_td_weight = float(
             safe_per_safety_td_weight
         )
+        self.safe_per_ema_decay = float(safe_per_ema_decay)
+        self.safe_per_ema_epsilon = float(safe_per_ema_epsilon)
+        self.safe_per_reward_td_ema = 0.0
+        self.safe_per_safety_td_ema = 0.0
+        self.safe_per_ema_initialized = False
         # 动态拉格朗日控制器由训练编排层共享；Agent 只保留最近一次从
         # checkpoint 读取的控制器状态，避免三个 Agent 各自更新同一代价。
         self.lagrange_controller_state = None
@@ -218,6 +225,15 @@ class D3QNAgent:
         ):
             raise ValueError(
                 "combined safe PER requires a positive TD weight"
+            )
+        if not 0.0 <= self.safe_per_ema_decay < 1.0:
+            raise ValueError("safe_per_ema_decay must be in [0, 1)")
+        if (
+            not np.isfinite(self.safe_per_ema_epsilon)
+            or self.safe_per_ema_epsilon <= 0.0
+        ):
+            raise ValueError(
+                "safe_per_ema_epsilon must be finite and positive"
             )
         self.batch_size = int(batch_size)
         self.buffer_size = int(buffer_size)
@@ -747,21 +763,50 @@ class D3QNAgent:
                     .cpu()
                     .numpy()
                 )
-                weight_sum = (
-                    self.safe_per_performance_td_weight
-                    + self.safe_per_safety_td_weight
+                reward_abs = np.nan_to_num(
+                    reward_abs, nan=0.0, posinf=0.0, neginf=0.0
                 )
-                # 两类 TD error 显式加权并除以权重和，避免仅因权重
-                # 总量改变 priority 绝对尺度。默认开关关闭，保留旧 Q_r PER。
+                safety_abs = np.nan_to_num(
+                    safety_abs, nan=0.0, posinf=0.0, neginf=0.0
+                )
+                reward_scale = float(np.mean(reward_abs))
+                safety_scale = float(np.mean(safety_abs))
+                if not self.safe_per_ema_initialized:
+                    self.safe_per_reward_td_ema = reward_scale
+                    self.safe_per_safety_td_ema = safety_scale
+                    self.safe_per_ema_initialized = True
+                else:
+                    decay = self.safe_per_ema_decay
+                    self.safe_per_reward_td_ema = (
+                        decay * self.safe_per_reward_td_ema
+                        + (1.0 - decay) * reward_scale
+                    )
+                    self.safe_per_safety_td_ema = (
+                        decay * self.safe_per_safety_td_ema
+                        + (1.0 - decay) * safety_scale
+                    )
+                normalized_reward_abs = reward_abs / max(
+                    self.safe_per_reward_td_ema,
+                    self.safe_per_ema_epsilon,
+                )
+                normalized_safety_abs = safety_abs / max(
+                    self.safe_per_safety_td_ema,
+                    self.safe_per_ema_epsilon,
+                )
                 new_prios = (
                     self.safe_per_performance_td_weight
-                    * reward_abs
+                    * normalized_reward_abs
                     + self.safe_per_safety_td_weight
-                    * safety_abs
-                ) / weight_sum
+                    * normalized_safety_abs
+                )
             else:
                 new_prios = reward_abs
-            new_prios = new_prios + 1e-6
+            new_prios = np.nan_to_num(
+                new_prios,
+                nan=0.0,
+                posinf=np.finfo(np.float32).max,
+                neginf=0.0,
+            ) + 1e-6
             for idx, prio in zip(indices, new_prios):
                 self.priorities[int(idx)] = float(prio)
 
@@ -854,7 +899,7 @@ class D3QNAgent:
                 else None
             ),
             "per_priority_mode": (
-                "combined_performance_safety_td"
+                "ema_normalized_performance_safety_td"
                 if (
                     self.use_per
                     and self.safe_rl_enabled
@@ -865,6 +910,32 @@ class D3QNAgent:
                     if self.use_per
                     else "disabled"
                 )
+            ),
+            "performance_td_error_abs_mean_raw": float(
+                reward_td_errors.detach().abs().mean().cpu()
+            ),
+            "safety_td_error_abs_mean_raw": (
+                float(safety_td_errors.detach().abs().mean().cpu())
+                if self.safe_rl_enabled
+                else None
+            ),
+            "performance_td_ema": float(
+                self.safe_per_reward_td_ema
+            ),
+            "safety_td_ema": float(self.safe_per_safety_td_ema),
+            "performance_td_error_abs_mean_normalized": (
+                float(np.mean(normalized_reward_abs))
+                if self.use_per
+                and self.safe_rl_enabled
+                and self.safe_per_combined_priority
+                else None
+            ),
+            "safety_td_error_abs_mean_normalized": (
+                float(np.mean(normalized_safety_abs))
+                if self.use_per
+                and self.safe_rl_enabled
+                and self.safe_per_combined_priority
+                else None
             ),
         }
         # 保持旧 update() 返回性能 loss 浮点数。
@@ -910,6 +981,17 @@ class D3QNAgent:
             ),
             "safe_per_safety_td_weight": float(
                 self.safe_per_safety_td_weight
+            ),
+            "safe_per_ema_decay": float(self.safe_per_ema_decay),
+            "safe_per_ema_epsilon": float(self.safe_per_ema_epsilon),
+            "safe_per_reward_td_ema": float(
+                self.safe_per_reward_td_ema
+            ),
+            "safe_per_safety_td_ema": float(
+                self.safe_per_safety_td_ema
+            ),
+            "safe_per_ema_initialized": bool(
+                self.safe_per_ema_initialized
             ),
             "transitions": transitions,
             "priorities": (
@@ -977,6 +1059,8 @@ class D3QNAgent:
                 "safe_per_safety_td_weight",
                 self.safe_per_safety_td_weight,
             ),
+            ("safe_per_ema_decay", self.safe_per_ema_decay),
+            ("safe_per_ema_epsilon", self.safe_per_ema_epsilon),
         )
         for key, current_value in replay_config:
             checkpoint_value = payload.get(key)
@@ -1061,6 +1145,23 @@ class D3QNAgent:
                 maxlen=self.buffer_size,
             )
             self.priorities = []
+        self.safe_per_reward_td_ema = float(
+            payload.get("safe_per_reward_td_ema", 0.0)
+        )
+        self.safe_per_safety_td_ema = float(
+            payload.get("safe_per_safety_td_ema", 0.0)
+        )
+        self.safe_per_ema_initialized = bool(
+            payload.get("safe_per_ema_initialized", False)
+        )
+        if not all(
+            np.isfinite(value) and value >= 0.0
+            for value in (
+                self.safe_per_reward_td_ema,
+                self.safe_per_safety_td_ema,
+            )
+        ):
+            raise ValueError("safe PER EMA state must be finite and non-negative")
 
     def save(
         self,
@@ -1078,7 +1179,7 @@ class D3QNAgent:
                 "online": self.online.state_dict(),
                 "target": self.target.state_dict(),
                 "optim": self.optim.state_dict(),
-                "checkpoint_schema_version": 5,
+                "checkpoint_schema_version": 6,
                 "input_dim": self.input_dim,
                 "output_dim": self.output_dim,
                 "safe_rl_enabled": bool(self.safe_rl_enabled),
@@ -1100,6 +1201,7 @@ class D3QNAgent:
                     if self.safe_rl_enabled
                     else None
                 ),
+                "performance_discount": self.gamma,
                 "safety_discount": self.safety_discount,
                 "safety_learning_rate": self.safety_learning_rate,
                 "safety_loss_weight": self.safety_loss_weight,
@@ -1136,6 +1238,16 @@ class D3QNAgent:
                 ),
                 "safe_replay_near_boundary_margin": (
                     self.safe_replay_near_boundary_margin
+                ),
+                "safe_per_ema_decay": self.safe_per_ema_decay,
+                "safe_per_ema_epsilon": self.safe_per_ema_epsilon,
+                "safe_per_reward_td_ema": self.safe_per_reward_td_ema,
+                "safe_per_safety_td_ema": self.safe_per_safety_td_ema,
+                "safe_per_ema_initialized": self.safe_per_ema_initialized,
+                "replay_state": (
+                    self.replay_state_dict()
+                    if self.safe_rl_enabled
+                    else None
                 ),
             },
             path,
@@ -1189,6 +1301,13 @@ class D3QNAgent:
             ckpt = torch.load(path, map_location=self.device, weights_only=True)
         except TypeError:
             ckpt = torch.load(path, map_location=self.device)
+
+        checkpoint_schema = ckpt.get("checkpoint_schema_version")
+        if self.safe_rl_enabled and checkpoint_schema != 6:
+            raise ValueError(
+                "legacy safe checkpoint schema is unsupported: "
+                f"checkpoint={checkpoint_schema!r}, current=6"
+            )
 
         checkpoint_observation_schema = ckpt.get(
             "observation_schema_version"
@@ -1245,6 +1364,13 @@ class D3QNAgent:
         self.online.load_state_dict(ckpt["online"], strict=strict)
         self.target.load_state_dict(ckpt["target"], strict=strict)
         self.optim.load_state_dict(ckpt["optim"])
+        self.gamma = float(
+            ckpt.get("performance_discount", self.gamma)
+        )
+        if not np.isfinite(self.gamma) or not 0.0 <= self.gamma <= 1.0:
+            raise ValueError(
+                "checkpoint performance_discount must be in [0, 1]"
+            )
         if self.safe_rl_enabled:
             for key in ("q_c_online", "q_c_target", "q_c_optim"):
                 if ckpt.get(key) is None:
@@ -1307,6 +1433,67 @@ class D3QNAgent:
         self.per_beta_end = ckpt.get("per_beta_end", self.per_beta_end)
         self.per_beta_steps = ckpt.get("per_beta_steps", self.per_beta_steps)
         self.per_beta_count = ckpt.get("per_beta_count", self.per_beta_count)
+        if (
+            self.use_per
+            and self.safe_rl_enabled
+            and self.safe_per_combined_priority
+        ):
+            required_ema = (
+                "safe_per_ema_decay",
+                "safe_per_ema_epsilon",
+                "safe_per_reward_td_ema",
+                "safe_per_safety_td_ema",
+                "safe_per_ema_initialized",
+            )
+            missing = [key for key in required_ema if key not in ckpt]
+            if missing:
+                raise ValueError(
+                    "legacy safe checkpoint is missing normalized PER "
+                    f"state: {missing}"
+                )
+            self.safe_per_ema_decay = float(
+                ckpt["safe_per_ema_decay"]
+            )
+            self.safe_per_ema_epsilon = float(
+                ckpt["safe_per_ema_epsilon"]
+            )
+            self.safe_per_reward_td_ema = float(
+                ckpt["safe_per_reward_td_ema"]
+            )
+            self.safe_per_safety_td_ema = float(
+                ckpt["safe_per_safety_td_ema"]
+            )
+            self.safe_per_ema_initialized = bool(
+                ckpt["safe_per_ema_initialized"]
+            )
+            if not 0.0 <= self.safe_per_ema_decay < 1.0:
+                raise ValueError(
+                    "checkpoint safe PER EMA decay must be in [0, 1)"
+                )
+            if (
+                not np.isfinite(self.safe_per_ema_epsilon)
+                or self.safe_per_ema_epsilon <= 0.0
+            ):
+                raise ValueError(
+                    "checkpoint safe PER EMA epsilon must be positive"
+                )
+            if not all(
+                np.isfinite(value) and value >= 0.0
+                for value in (
+                    self.safe_per_reward_td_ema,
+                    self.safe_per_safety_td_ema,
+                )
+            ):
+                raise ValueError(
+                    "checkpoint safe PER EMA state must be finite and non-negative"
+                )
+        if self.safe_rl_enabled:
+            replay_state = ckpt.get("replay_state")
+            if not isinstance(replay_state, dict):
+                raise ValueError(
+                    "safe checkpoint is missing versioned replay_state"
+                )
+            self.load_replay_state_dict(replay_state)
 
 
 __all__ = ["D3QNAgent", "DuelingQNet"]

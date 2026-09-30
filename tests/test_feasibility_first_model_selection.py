@@ -14,6 +14,8 @@ from hrl_mix.model_selection import (
     build_config_snapshot,
     build_heuristic_library_version,
     build_replay_metadata,
+    is_better_fallback_model,
+    is_better_feasible_model,
     is_better_model,
     save_best_checkpoint_bundle,
 )
@@ -30,7 +32,7 @@ def _metrics(**overrides):
         "feasible_seed_rate": 1.0,
         "worst_seed_violation": 0.0,
         "worst_seed_lateness": 0.0,
-        "validation_seed_count": 3,
+        "validation_seed_count": 5,
     }
     values.update(overrides)
     return FeasibilityFirstModelMetrics(**values)
@@ -130,6 +132,23 @@ class FeasibilityFirstOrderingTests(unittest.TestCase):
         incumbent = _metrics()
         self.assertFalse(is_better_model(_metrics(), incumbent))
 
+    def test_feasible_and_fallback_tracks_update_independently(self):
+        feasible = _metrics(fuzzy_energy_score=20.0)
+        fallback = _metrics(
+            deadline_violation_rate=0.1,
+            max_fuzzy_lateness=2.0,
+            mean_fuzzy_lateness=1.0,
+            fuzzy_energy_score=5.0,
+            all_seed_feasible=False,
+            feasible_seed_rate=0.8,
+            worst_seed_violation=0.2,
+            worst_seed_lateness=2.0,
+        )
+        self.assertTrue(is_better_feasible_model(feasible, None))
+        self.assertFalse(is_better_fallback_model(feasible, fallback))
+        self.assertTrue(is_better_fallback_model(fallback, None))
+        self.assertFalse(is_better_feasible_model(fallback, feasible))
+
 
 class MultiSeedMetricTests(unittest.TestCase):
     def test_aggregate_reports_required_seed_fields(self):
@@ -166,7 +185,7 @@ class MultiSeedMetricTests(unittest.TestCase):
     def test_train_eval_reconstructs_fuzzy_lateness_per_seed(self):
         try:
             from hrl_mix.train_eval import (
-                evaluate_hrl_three_layer_multi_seed,
+                evaluate_hrl_two_level_multi_seed,
             )
         except ModuleNotFoundError as exc:
             if exc.name == "torch":
@@ -249,10 +268,9 @@ class MultiSeedMetricTests(unittest.TestCase):
                     )
                 return 0
 
-        result = evaluate_hrl_three_layer_multi_seed(
+        result = evaluate_hrl_two_level_multi_seed(
             FinishedEnvironment,
             {},
-            FixedAgent(),
             FixedAgent(),
             FixedAgent(),
             seeds=(1, 2),
@@ -275,6 +293,12 @@ class CheckpointBundleTests(unittest.TestCase):
 
         def __init__(self, name):
             self.name = name
+            self.input_dim = 3
+            self.output_dim = 2
+            self.hidden_dims = (4,)
+            self.gamma = 0.99 if name == "worker" else 0.95
+            self.safety_discount = 0.99
+            self.observation_schema_version = "test_v1"
 
         def save(self, path, *, lagrange_controller_state=None):
             Path(path).write_text(
@@ -298,7 +322,7 @@ class CheckpointBundleTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             agents = {
                 layer: self.Agent(layer)
-                for layer in ("manager", "host", "vm")
+                for layer in ("manager", "worker")
             }
             manifest = save_best_checkpoint_bundle(
                 directory,
@@ -332,7 +356,7 @@ class CheckpointBundleTests(unittest.TestCase):
             )
             self.assertEqual(
                 set(payload["agent_checkpoints"]),
-                {"manager", "host", "vm"},
+                {"manager", "worker"},
             )
             for layer in agents:
                 contents = payload[
@@ -402,7 +426,7 @@ class CheckpointBundleTests(unittest.TestCase):
         replay = build_replay_metadata(agent)
         self.assertEqual(replay["transition_count"], 0)
         self.assertEqual(replay["capacity"], 100)
-        self.assertFalse(replay["replay_transitions_embedded"])
+        self.assertTrue(replay["replay_transitions_embedded"])
 
         heuristic = build_heuristic_library_version(
             SimpleNamespace(

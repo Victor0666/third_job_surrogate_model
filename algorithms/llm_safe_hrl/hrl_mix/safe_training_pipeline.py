@@ -29,7 +29,7 @@ from hrl_mix.model_selection import protocol_identity_from_config_snapshot
 
 SAFE_TRAINING_PLAN_SCHEMA_VERSION = 1
 SAFE_TRAINING_STATE_SCHEMA_VERSION = 1
-SAFE_TRAINING_CHECKPOINT_SCHEMA_VERSION = 2
+SAFE_TRAINING_CHECKPOINT_SCHEMA_VERSION = 4
 
 PREPARATION_STAGE_TYPES = (
     "demonstration_generation",
@@ -164,7 +164,7 @@ class StrictTrainingSeedSplit:
 
 @dataclass(frozen=True)
 class CurriculumProfile:
-    """Environment profile that preserves Host/VM topology dimensions."""
+    """Environment profile that preserves global-VM action dimensions."""
 
     ddl_level: str
     deadline_alpha_small: float
@@ -1211,6 +1211,26 @@ class SafeStageMetricsLogger:
             handle.write("\n")
 
 
+def _validated_track_metrics(value, label, *, feasible):
+    if value is None:
+        return None
+    result = dict(_require_mapping(value, label))
+    for field_name in (
+        "deadline_violation_rate",
+        "max_fuzzy_lateness",
+        "mean_fuzzy_lateness",
+        "fuzzy_energy_score",
+        "all_seed_feasible",
+        "worst_seed_violation",
+        "worst_seed_lateness",
+    ):
+        if field_name not in result:
+            raise ValueError(f"{label} is missing {field_name}")
+    if bool(result["all_seed_feasible"]) != bool(feasible):
+        raise ValueError(f"{label} feasibility track mismatch")
+    return result
+
+
 def save_pipeline_checkpoint(
     directory: str | os.PathLike[str],
     *,
@@ -1219,7 +1239,8 @@ def save_pipeline_checkpoint(
     lagrange_controller: Any,
     global_step: int,
     next_episode: int,
-    best_model_metrics: Mapping[str, Any] | None,
+    best_feasible_metrics: Mapping[str, Any] | None,
+    best_fallback_metrics: Mapping[str, Any] | None,
     replay_metadata: Mapping[str, Any],
     heuristic_library_version: Mapping[str, Any],
     config_snapshot: Mapping[str, Any],
@@ -1228,10 +1249,10 @@ def save_pipeline_checkpoint(
     """Save complete safe-HRL state plus a versioned orchestration manifest."""
     target_dir = Path(directory).resolve()
     target_dir.mkdir(parents=True, exist_ok=True)
-    expected_layers = {"manager", "host", "vm"}
+    expected_layers = {"manager", "worker"}
     if set(agents) != expected_layers:
         raise ValueError(
-            "pipeline checkpoint requires manager/host/vm agents"
+            "pipeline checkpoint requires manager/worker agents"
         )
     if not all(
         bool(getattr(agent, "safe_rl_enabled", False))
@@ -1267,28 +1288,21 @@ def save_pipeline_checkpoint(
         )
         checkpoint_files[layer] = filename
 
-    if best_model_metrics is not None:
-        best_model_metrics = dict(
-            _require_mapping(
-                best_model_metrics,
-                "best_model_metrics",
-            )
-        )
-        for field_name in (
-            "deadline_violation_rate",
-            "max_fuzzy_lateness",
-            "mean_fuzzy_lateness",
-            "fuzzy_energy_score",
-        ):
-            if field_name not in best_model_metrics:
-                raise ValueError(
-                    "pipeline checkpoint best_model_metrics "
-                    f"is missing {field_name}"
-                )
+    best_feasible_metrics = _validated_track_metrics(
+        best_feasible_metrics,
+        "best_feasible_metrics",
+        feasible=True,
+    )
+    best_fallback_metrics = _validated_track_metrics(
+        best_fallback_metrics,
+        "best_fallback_metrics",
+        feasible=False,
+    )
+    resolved_best_metrics = best_feasible_metrics or best_fallback_metrics
     best_energy_json = (
         None
-        if best_model_metrics is None
-        else float(best_model_metrics["fuzzy_energy_score"])
+        if resolved_best_metrics is None
+        else float(resolved_best_metrics["fuzzy_energy_score"])
     )
     snapshot_protocol = protocol_identity_from_config_snapshot(
         config_snapshot
@@ -1326,6 +1340,7 @@ def save_pipeline_checkpoint(
         "agent_checkpoints": checkpoint_files,
         "agent_checkpoint_contents": {
             layer: {
+                "checkpoint_schema_version": 6,
                 "q_r": {
                     "online_key": "online",
                     "target_key": "target",
@@ -1339,14 +1354,24 @@ def save_pipeline_checkpoint(
                 "lagrange_multiplier_key": (
                     "lagrange_multiplier"
                 ),
+                "performance_discount_key": "performance_discount",
+                "safety_discount_key": "safety_discount",
+                "replay_state_key": "replay_state",
+                "per_normalization_keys": [
+                    "safe_per_reward_td_ema",
+                    "safe_per_safety_td_ema",
+                    "safe_per_ema_initialized",
+                ],
             }
             for layer in sorted(expected_layers)
         },
         "lagrange_controller_state": lagrange_state,
         "global_step": int(global_step),
         "next_episode": int(next_episode),
-        "best_model_metrics": best_model_metrics,
-        # Deprecated convenience alias retained for audit readers.
+        "best_feasible_metrics": best_feasible_metrics,
+        "best_fallback_metrics": best_fallback_metrics,
+        # Deprecated resolved aliases retained only for old audit readers.
+        "best_model_metrics": resolved_best_metrics,
         "best_validation_energy": best_energy_json,
         "curriculum_stage": {
             "stage_index": int(controller.current_stage_index),
@@ -1422,28 +1447,21 @@ def read_pipeline_checkpoint(
             actual_protocol,
             artifact_name="safe training checkpoint",
         )
-    best_model_metrics = payload.get("best_model_metrics")
-    if best_model_metrics is not None:
-        best_model_metrics = _require_mapping(
-            best_model_metrics,
-            "best_model_metrics",
-        )
-        for field_name in (
-            "deadline_violation_rate",
-            "max_fuzzy_lateness",
-            "mean_fuzzy_lateness",
-            "fuzzy_energy_score",
-        ):
-            if field_name not in best_model_metrics:
-                raise ValueError(
-                    "safe training checkpoint best_model_metrics "
-                    f"is missing {field_name}"
-                )
+    payload["best_feasible_metrics"] = _validated_track_metrics(
+        payload.get("best_feasible_metrics"),
+        "best_feasible_metrics",
+        feasible=True,
+    )
+    payload["best_fallback_metrics"] = _validated_track_metrics(
+        payload.get("best_fallback_metrics"),
+        "best_fallback_metrics",
+        feasible=False,
+    )
     replay_metadata = _require_mapping(
         payload.get("replay_metadata"),
         "replay_metadata",
     )
-    if set(replay_metadata) != {"manager", "host", "vm"}:
+    if set(replay_metadata) != {"manager", "worker"}:
         raise ValueError(
             "safe training checkpoint replay metadata layer mismatch"
         )
@@ -1481,7 +1499,7 @@ def read_pipeline_checkpoint(
         payload.get("agent_checkpoints"),
         "agent_checkpoints",
     )
-    if set(checkpoints) != {"manager", "host", "vm"}:
+    if set(checkpoints) != {"manager", "worker"}:
         raise ValueError(
             "safe training checkpoint layer set mismatch"
         )
@@ -1515,11 +1533,11 @@ def restore_pipeline_agents(
         payload.get("resolved_agent_checkpoints"),
         "resolved_agent_checkpoints",
     )
-    if set(agents) != {"manager", "host", "vm"}:
+    if set(agents) != {"manager", "worker"}:
         raise ValueError(
-            "pipeline restore requires manager/host/vm agents"
+            "pipeline restore requires manager/worker agents"
         )
-    for layer in ("manager", "host", "vm"):
+    for layer in ("manager", "worker"):
         agents[layer].load(str(checkpoints[layer]))
     lagrange_state = payload.get("lagrange_controller_state")
     if lagrange_controller is not None and lagrange_state is not None:

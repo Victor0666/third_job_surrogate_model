@@ -557,7 +557,6 @@ class FinalTestSeedIsolationTests(unittest.TestCase):
                 {},
                 object(),
                 object(),
-                object(),
                 training_seeds=(1, 2),
                 validation_seeds=(3,),
                 final_test_seeds=(2, 4),
@@ -573,11 +572,11 @@ class FinalTestSeedIsolationTests(unittest.TestCase):
             raise
 
         report = _safe_report(seed=30)
-        fake_result = (1.0, 2.0, 3.0, 4.0, report)
+        fake_result = (1.0, 2.0, 3.0, report)
         with tempfile.TemporaryDirectory() as directory:
             with mock.patch.object(
                 train_eval,
-                "evaluate_hrl_three_layer_multi_seed",
+                "evaluate_hrl_two_level_multi_seed",
                 return_value=fake_result,
             ) as evaluation:
                 result = (
@@ -587,7 +586,6 @@ class FinalTestSeedIsolationTests(unittest.TestCase):
                         {},
                         object(),
                         object(),
-                        object(),
                         training_seeds=(10,),
                         validation_seeds=(20,),
                         final_test_seeds=(30,),
@@ -595,7 +593,7 @@ class FinalTestSeedIsolationTests(unittest.TestCase):
                     )
                 )
             self.assertEqual(
-                evaluation.call_args.args[5],
+                evaluation.call_args.args[4],
                 (30,),
             )
             self.assertEqual(

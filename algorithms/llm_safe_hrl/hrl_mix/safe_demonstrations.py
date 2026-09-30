@@ -1,4 +1,4 @@
-"""Generate versioned three-layer demonstrations from the real HRL environment.
+"""Generate Manager + Global Worker demonstrations from the real environment.
 
 The Manager action is a fixed admitted heuristic index for each phase.  The
 heuristic orders ready tasks only.  Resource actions are selected with the
@@ -19,6 +19,7 @@ from base.safe_demonstration import (
     SAFE_DEMONSTRATION_GENERATOR_POLICY,
     DemonstrationSafetyStandard,
     SafeDemonstrationEpisode,
+    demonstration_safety_config,
 )
 from base.safe_replay import SafeReplayTransition
 from hrl_mix.train_utils import (
@@ -36,6 +37,8 @@ class DemonstrationGenerationOptions:
     workflow_seed: int
     resource_seed: int
     split: str
+    source_scenario: str | None
+    ddl_name: str
     episode_id: str | None = None
     near_boundary_margin: float = 0.0
     max_manager_phases: int = 100000
@@ -49,6 +52,12 @@ class DemonstrationGenerationOptions:
             "final_test",
         }:
             raise ValueError("unsupported demonstration split")
+        if self.source_scenario not in (None, "") and len(
+            str(self.source_scenario).strip()
+        ) != 2:
+            raise ValueError("source_scenario must be a two-letter scenario")
+        if not str(self.ddl_name).strip():
+            raise ValueError("ddl_name must not be empty")
         if (
             not np.isfinite(float(self.near_boundary_margin))
             or float(self.near_boundary_margin) < 0.0
@@ -186,8 +195,8 @@ def _commit_pending(
     )
 
 
-def _resolve_fixed_resource_actions(env) -> tuple[int, int, bool]:
-    """Return host action, local VM action, and whether fallback is used."""
+def _resolve_global_worker_action(env) -> tuple[int, bool]:
+    """Choose minimum-energy safe VM, or minimum-violation fallback."""
     context = env._current_safety_shield_context
     if context is None:
         raise RuntimeError("missing task safety context")
@@ -207,23 +216,18 @@ def _resolve_fixed_resource_actions(env) -> tuple[int, int, bool]:
             )
         global_vm_index = int(global_vm_index)
     else:
-        safe_vm_ids = [
-            int(env.vm_ids[int(index)])
-            for index in safe_global_indices
-        ]
-        vm_id, _ = env.select_vm_deterministic(
-            env._cur_tid,
-            candidate_vm_ids=safe_vm_ids,
+        global_vm_index = min(
+            (int(index) for index in safe_global_indices),
+            key=lambda index: (
+                float(
+                    context["global_vm_metrics"][index][
+                        "fuzzy_marginal_energy"
+                    ]
+                ),
+                int(index),
+            ),
         )
-        global_vm_index = int(env.vm_ids.index(int(vm_id)))
-
-    vm_id = int(env.vm_ids[global_vm_index])
-    host_id = int(env.vms[vm_id].host_id)
-    host_action = int(env.host_ids.index(host_id))
-    vm_action = int(
-        env.host_to_vm_indices[host_id].index(global_vm_index)
-    )
-    return host_action, vm_action, fallback
+    return int(global_vm_index), fallback
 
 
 def _final_episode_metrics(env) -> dict:
@@ -340,8 +344,7 @@ def generate_safe_demonstration_episode(
     trajectories = {
         layer: [] for layer in DEMONSTRATION_LAYERS
     }
-    pending_host = None
-    pending_vm = None
+    pending_worker = None
     phases = 0
 
     while not env.done_flag:
@@ -366,113 +369,58 @@ def generate_safe_demonstration_episode(
         env.apply_manager_heuristic(heuristic_index)
 
         while True:
-            host_state, has_host = (
-                env.get_host_state_for_next_assignment()
+            worker_state, has_worker = (
+                env.get_global_vm_state_for_current_task()
             )
-            if not has_host:
+            if not has_worker:
                 break
-            if pending_host is not None:
+            if pending_worker is not None:
                 _commit_pending(
-                    trajectories["host"],
-                    pending_host,
-                    next_state=host_state["obs"],
+                    trajectories["worker"],
+                    pending_worker,
+                    next_state=worker_state["obs"],
                     next_mask=_copy_mask(
-                        host_state, "final_action_mask"
+                        worker_state, "final_action_mask"
                     ),
                     done=False,
                     near_boundary_margin=(
                         options.near_boundary_margin
                     ),
                 )
-                pending_host = None
+                pending_worker = None
 
-            host_action, vm_action, fallback = (
-                _resolve_fixed_resource_actions(env)
+            worker_action, fallback = (
+                _resolve_global_worker_action(env)
             )
-            host_selection = _demonstration_selection(
-                host_action, fallback=fallback
+            worker_selection = _demonstration_selection(
+                worker_action, fallback=fallback
             )
-            env.host_select(
-                host_action,
-                action_selection=host_selection,
+            worker_reward, task_info = env.global_vm_assign(
+                worker_action,
+                action_selection=worker_selection,
             )
-            vm_state, has_vm = (
-                env.get_vm_state_for_current_task()
-            )
-            if not has_vm:
-                raise RuntimeError(
-                    "fixed resource choice produced no VM state"
-                )
-            if pending_vm is not None:
-                _commit_pending(
-                    trajectories["vm"],
-                    pending_vm,
-                    next_state=vm_state["obs"],
-                    next_mask=_copy_mask(
-                        vm_state, "final_action_mask"
-                    ),
-                    done=False,
-                    near_boundary_margin=(
-                        options.near_boundary_margin
-                    ),
-                )
-                pending_vm = None
-
-            vm_selection = _demonstration_selection(
-                vm_action, fallback=fallback
-            )
-            r_host, r_vm, task_info = env.vm_assign(
-                vm_action,
-                action_selection=vm_selection,
-            )
-            host_audit = finalize_action_audit(
-                host_selection,
-                task_info.get("host_shield_decision", {}),
-            )
-            vm_audit = finalize_action_audit(
-                vm_selection,
+            worker_audit = finalize_action_audit(
+                worker_selection,
                 task_info.get("vm_shield_decision", {}),
             )
-            host_reward = float(
+            worker_reward = float(
                 task_info.get(
                     "total_performance_reward",
-                    task_info.get(
-                        "performance_reward_host", r_host
-                    ),
-                )
-            )
-            vm_reward = float(
-                task_info.get(
-                    "total_performance_reward",
-                    task_info.get("performance_reward_vm", r_vm),
+                    task_info.get("performance_reward_vm", worker_reward),
                 )
             )
             safety_cost = float(
                 task_info.get("safety_cost", 0.0)
             )
-            pending_host = _pending_transition(
-                host_state,
-                host_audit,
+            pending_worker = _pending_transition(
+                worker_state,
+                worker_audit,
                 task_info,
-                reward=host_reward,
+                reward=worker_reward,
                 cost=safety_cost,
                 reward_components=performance_reward_components(
                     task_info,
-                    total_performance_reward=host_reward,
-                ),
-                shield_decision=task_info.get(
-                    "host_shield_decision", {}
-                ),
-            )
-            pending_vm = _pending_transition(
-                vm_state,
-                vm_audit,
-                task_info,
-                reward=vm_reward,
-                cost=safety_cost,
-                reward_components=performance_reward_components(
-                    task_info,
-                    total_performance_reward=vm_reward,
+                    total_performance_reward=worker_reward,
                 ),
                 shield_decision=task_info.get(
                     "vm_shield_decision", {}
@@ -544,38 +492,22 @@ def generate_safe_demonstration_episode(
         )
 
         if env.done_flag:
-            if pending_host is not None:
+            if pending_worker is not None:
                 _commit_pending(
-                    trajectories["host"],
-                    pending_host,
+                    trajectories["worker"],
+                    pending_worker,
                     next_state=np.zeros_like(
-                        pending_host["state"]
+                        pending_worker["state"]
                     ),
                     next_mask=np.zeros_like(
-                        pending_host["final_action_mask"]
+                        pending_worker["final_action_mask"]
                     ),
                     done=True,
                     near_boundary_margin=(
                         options.near_boundary_margin
                     ),
                 )
-                pending_host = None
-            if pending_vm is not None:
-                _commit_pending(
-                    trajectories["vm"],
-                    pending_vm,
-                    next_state=np.zeros_like(
-                        pending_vm["state"]
-                    ),
-                    next_mask=np.zeros_like(
-                        pending_vm["final_action_mask"]
-                    ),
-                    done=True,
-                    near_boundary_margin=(
-                        options.near_boundary_margin
-                    ),
-                )
-                pending_vm = None
+                pending_worker = None
 
     metrics = _final_episode_metrics(env)
     standard = (
@@ -599,6 +531,14 @@ def generate_safe_demonstration_episode(
         heuristic_version=heuristic.version,
         workflow_seed=int(options.workflow_seed),
         resource_seed=int(options.resource_seed),
+        scenario_code=str(env.scenario_code),
+        source_scenario=(
+            None
+            if options.source_scenario in (None, "")
+            else str(options.source_scenario).strip().upper()
+        ),
+        ddl_name=str(options.ddl_name).strip(),
+        resource_scale=str(env.resource_code),
         ddl_setting={
             "deadline_mode": str(env.deadline_mode),
             "deadline_alpha_small": float(
@@ -624,6 +564,7 @@ def generate_safe_demonstration_episode(
             ),
             "resource_seed": int(env.fuzzy_resource_seed),
         },
+        safety_config=demonstration_safety_config(env),
         observation_schema_versions={
             layer: str(
                 env.get_observation_schema(layer)[

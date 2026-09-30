@@ -452,7 +452,7 @@ def build_config(
         ddl=ddl_name,
         algorithm_seed=algorithm_seed,
         train_seeds=(1, 2, 3, 4, 5),
-        validation_seeds=(101, 102, 103),
+        validation_seeds=(101, 102, 103, 104, 105),
         test_seeds=tuple(range(201, 231)),
         protocol=(protocol_context.protocol if protocol_context is not None else "legacy"),
         source_scenario=(

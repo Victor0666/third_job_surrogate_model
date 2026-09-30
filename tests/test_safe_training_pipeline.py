@@ -370,7 +370,7 @@ class SafeTrainingPipelineTests(unittest.TestCase):
                 controller.record_episode()
             agents = {
                 layer: _DummyAgent(layer)
-                for layer in ("manager", "host", "vm")
+                for layer in ("manager", "worker")
             }
             lagrange = _DummyLagrange()
             checkpoint = save_pipeline_checkpoint(
@@ -380,7 +380,7 @@ class SafeTrainingPipelineTests(unittest.TestCase):
                 lagrange_controller=lagrange,
                 global_step=7,
                 next_episode=120,
-                best_model_metrics={
+                best_feasible_metrics={
                     "deadline_violation_rate": 0.0,
                     "max_fuzzy_lateness": 0.0,
                     "mean_fuzzy_lateness": 0.0,
@@ -389,6 +389,17 @@ class SafeTrainingPipelineTests(unittest.TestCase):
                     "feasible_seed_rate": 1.0,
                     "worst_seed_violation": 0.0,
                     "worst_seed_lateness": 0.0,
+                    "validation_seed_count": 2,
+                },
+                best_fallback_metrics={
+                    "deadline_violation_rate": 0.1,
+                    "max_fuzzy_lateness": 3.0,
+                    "mean_fuzzy_lateness": 1.0,
+                    "fuzzy_energy_score": 10.0,
+                    "all_seed_feasible": False,
+                    "feasible_seed_rate": 0.5,
+                    "worst_seed_violation": 0.2,
+                    "worst_seed_lateness": 3.0,
                     "validation_seed_count": 2,
                 },
                 replay_metadata={
@@ -417,7 +428,7 @@ class SafeTrainingPipelineTests(unittest.TestCase):
             )
             restored_agents = {
                 layer: _DummyAgent(f"new_{layer}")
-                for layer in ("manager", "host", "vm")
+                for layer in ("manager", "worker")
             }
             restored_lagrange = _DummyLagrange()
             restored_lagrange.current_lambda = 0.0
@@ -442,14 +453,20 @@ class SafeTrainingPipelineTests(unittest.TestCase):
                 )
             )
             self.assertEqual(
-                payload["best_model_metrics"][
+                payload["best_feasible_metrics"][
                     "fuzzy_energy_score"
                 ],
                 12.0,
             )
             self.assertEqual(
+                payload["best_fallback_metrics"][
+                    "worst_seed_violation"
+                ],
+                0.2,
+            )
+            self.assertEqual(
                 set(payload["replay_metadata"]),
-                {"manager", "host", "vm"},
+                {"manager", "worker"},
             )
             self.assertEqual(
                 payload["curriculum_stage"]["stage_id"],

@@ -1,6 +1,6 @@
 """验证评估并行化的语义回归测试。
 
-验证 episode 是 ``(env_kwargs, seed, 三个 agent 权重)`` 的纯函数：agent 只被
+验证 episode 是 ``(env_kwargs, seed, 两个 agent 权重)`` 的纯函数：agent 只被
 ``deterministic=True, count_step=False`` 的只读推理调用，环境由 seed 完全决定，
 汇总只发生在 :func:`hrl_mix.train_eval.aggregate_seed_results`。因此把 seed
 分发到工作进程后结果必须逐位不变。本测试锁住：
@@ -28,7 +28,7 @@ import numpy as np
 from hrl_mix.train_eval import (
     aggregate_seed_results,
     assert_seed_results_identical,
-    evaluate_hrl_three_layer_multi_seed,
+    evaluate_hrl_two_level_multi_seed,
     evaluation_ctor_kwargs,
 )
 from hrl_mix.validation_parallel import (
@@ -64,7 +64,7 @@ class _StubEnv:
     def apply_manager_action(self, action):
         del action
 
-    def get_host_state_for_next_assignment(self):
+    def get_global_vm_state_for_current_task(self):
         if self._assigned:
             return None, False
         # 非 safe 模式下层级 mask 走历史 "mask" 字段。
@@ -73,22 +73,12 @@ class _StubEnv:
             "mask": np.ones(2, dtype=np.float32),
         }, True
 
-    def host_select(self, action):
-        del action
-
-    def get_vm_state_for_current_task(self):
-        return {
-            "obs": np.full(3, float(self.random_seed), dtype=np.float32),
-            "mask": np.ones(2, dtype=np.float32),
-        }, True
-
-    def vm_assign(self, action):
+    def global_vm_assign(self, action):
         del action
         self._assigned = True
         # 奖励刻意用不可交换的小数，聚合顺序一变就会露馅。
-        r_host = 0.1 * self.random_seed + 0.007 * self._phase
         r_vm = 0.3 * self.random_seed - 0.011 * self._phase
-        return r_host, r_vm, {}
+        return r_vm, {}
 
     def finish_phase_and_advance(self):
         self._assigned = False
@@ -127,10 +117,10 @@ class _StubAgent:
         }
 
 
-def _legacy_multi_seed(env_cls, env_kwargs, vm, host, mgr, seeds):
+def _legacy_multi_seed(env_cls, env_kwargs, worker, mgr, seeds):
     """改动前的实现：单函数内循环 seed 并即时累积。"""
     base_ctor_kwargs = evaluation_ctor_kwargs(env_kwargs)
-    vm_list, host_list, mgr_list, energy_list = [], [], [], []
+    vm_list, mgr_list, energy_list = [], [], []
     for sd in seeds:
         ctor_kwargs = dict(base_ctor_kwargs)
         ctor_kwargs["random_seed"] = int(sd)
@@ -145,45 +135,31 @@ def _legacy_multi_seed(env_cls, env_kwargs, vm, host, mgr, seeds):
         )
         done = False
         phases = 0
-        ret_mgr = ret_vm = ret_host = 0.0
+        ret_mgr = ret_vm = 0.0
         while not done:
-            vm_rewards, host_rewards = [], []
+            vm_rewards = []
             while True:
-                st_host, has_next = env.get_host_state_for_next_assignment()
+                st_vm, has_next = env.get_global_vm_state_for_current_task()
                 if not has_next:
                     break
-                host.select_action_with_info(
-                    st_host["obs"],
-                    st_host["mask"],
-                    deterministic=True,
-                    count_step=False,
-                )
-                env.host_select(0)
-                st_vm, ok_vm = env.get_vm_state_for_current_task()
-                if not ok_vm:
-                    break
-                vm.select_action_with_info(
+                worker.select_action_with_info(
                     st_vm["obs"],
                     st_vm["mask"],
                     deterministic=True,
                     count_step=False,
                 )
-                r_host, r_vm, _ = env.vm_assign(0)
-                host_rewards.append(float(r_host))
+                r_vm, _ = env.global_vm_assign(0)
                 vm_rewards.append(float(r_vm))
             r_manager_raw, _ = env.finish_phase_and_advance()
             ret_mgr += float(r_manager_raw)
             ret_vm += float(np.mean(vm_rewards)) if vm_rewards else 0.0
-            ret_host += float(np.mean(host_rewards)) if host_rewards else 0.0
             phases += 1
             done = bool(env.done_flag)
         vm_list.append(ret_vm / max(phases, 1))
-        host_list.append(ret_host / max(phases, 1))
         mgr_list.append(ret_mgr / max(phases, 1))
         energy_list.append(float(env.total_energy))
     return (
         float(np.mean(vm_list)),
-        float(np.mean(host_list)),
         float(np.mean(mgr_list)),
         float(np.mean(energy_list)),
     )
@@ -194,12 +170,11 @@ class RefactorExactnessTests(unittest.TestCase):
         seeds = (101, 102, 103)
         env_kwargs = {"phases": 3, "energy_reward_scale": 1.0}
         expected = _legacy_multi_seed(
-            _StubEnv, env_kwargs, _StubAgent(), _StubAgent(), _StubAgent(), seeds
+            _StubEnv, env_kwargs, _StubAgent(), _StubAgent(), seeds
         )
-        got = evaluate_hrl_three_layer_multi_seed(
+        got = evaluate_hrl_two_level_multi_seed(
             _StubEnv,
             env_kwargs,
-            _StubAgent(),
             _StubAgent(),
             _StubAgent(),
             seeds=seeds,
@@ -260,19 +235,17 @@ class PoolOrderingTests(unittest.TestCase):
     def test_out_of_order_completion_still_aggregates_in_seed_order(self):
         seeds = (101, 102, 103)
         env_kwargs = {"phases": 3}
-        serial = evaluate_hrl_three_layer_multi_seed(
+        serial = evaluate_hrl_two_level_multi_seed(
             _StubEnv,
             env_kwargs,
-            _StubAgent(),
             _StubAgent(),
             _StubAgent(),
             seeds=seeds,
         )
-        pool = _RecordingPool((_StubAgent(), _StubAgent(), _StubAgent()))
-        pooled = evaluate_hrl_three_layer_multi_seed(
+        pool = _RecordingPool((_StubAgent(), _StubAgent()))
+        pooled = evaluate_hrl_two_level_multi_seed(
             _StubEnv,
             env_kwargs,
-            _StubAgent(),
             _StubAgent(),
             _StubAgent(),
             seeds=seeds,
@@ -285,15 +258,15 @@ class PoolOrderingTests(unittest.TestCase):
         # 顺序真的会改变结果，所以上一个用例不是空断言。
         # 大数吸收小数：正序先加满 1.0，逆序两个小量先相加得以幸存。
         rows = [
-            (0.1, 0.0, 0.0, 1.0, None),
-            (0.2, 0.0, 0.0, 1e-16, None),
-            (0.3, 0.0, 0.0, 1e-16, None),
+            (0.1, 0.0, 1.0, None),
+            (0.2, 0.0, 1e-16, None),
+            (0.3, 0.0, 1e-16, None),
         ]
         forward = aggregate_seed_results(rows, return_safety_metrics=False)
         backward = aggregate_seed_results(
             list(reversed(rows)), return_safety_metrics=False
         )
-        self.assertNotEqual(forward[3], backward[3])
+        self.assertNotEqual(forward[2], backward[2])
 
 
 class WorkerCountTests(unittest.TestCase):
@@ -356,7 +329,6 @@ class AuditComparatorTests(unittest.TestCase):
         return (
             0.1,
             0.2,
-            0.3,
             energy,
             {
                 "max_fuzzy_lateness": lateness,

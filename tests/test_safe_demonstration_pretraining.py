@@ -16,7 +16,7 @@ from base.safe_demonstration import (
     DemonstrationSafetyStandard,
     SafeDemonstrationEpisode,
     StrictSeedSplit,
-    append_demonstration_episode,
+    append_demonstration_episode as _append_demonstration_episode,
     load_demonstration_split,
 )
 from base.safe_replay import SafeReplayTransition
@@ -59,14 +59,46 @@ DEFAULT_LIBRARY = (
 
 LAYER_DIMS = {
     "manager": (3, 2),
-    "host": (4, 2),
-    "vm": (5, 2),
+    "worker": (5, 2),
 }
 SCHEMAS = {
     "manager": "test_manager_schema_v1",
-    "host": "test_host_schema_v1",
-    "vm": "test_vm_schema_v1",
+    "worker": "test_global_worker_schema_v1",
 }
+MANAGER_HEURISTIC_IDS = ("traditional_edf", "rule_B")
+MANAGER_MANIFEST_SHA256 = "a" * 64
+SAFETY_CONFIG = {
+    "shield_enabled": True,
+    "fallback_controller": "fixed_vm_rule",
+    "deadline_eta": 0.95,
+    "fuzzy_use_deadline_constraint": True,
+    "process_risk_aggregation": "mean",
+    "predicted_violation_weight": 1.0,
+    "actual_violation_weight": 1.0,
+    "lateness_weight": 1.0,
+    "positive_delta_risk_weight": 0.1,
+    "lateness_normalizer": 300.0,
+    "lateness_clip": 5.0,
+}
+EXPECTED_DEMO_CONTEXT = {
+    "expected_scenario_code": "SS",
+    "expected_source_scenario": "SS",
+    "expected_ddl_name": "Tight",
+    "expected_ddl_setting": {"name": "test"},
+    "expected_resource_scale": "S",
+    "expected_worker_action_dim": 2,
+    "expected_num_vms": 2,
+    "expected_safety_config": SAFETY_CONFIG,
+}
+
+
+def append_demonstration_episode(*args, **kwargs):
+    kwargs.setdefault("manager_heuristic_ids", MANAGER_HEURISTIC_IDS)
+    kwargs.setdefault(
+        "manager_heuristic_manifest_sha256",
+        MANAGER_MANIFEST_SHA256,
+    )
+    return _append_demonstration_episode(*args, **kwargs)
 
 
 def _transition(input_dim, action_dim, *, cost=0.0):
@@ -147,6 +179,11 @@ def _episode(
             for layer in LAYER_DIMS
         },
         safety_standard=DemonstrationSafetyStandard(),
+        scenario_code="SS",
+        source_scenario="SS",
+        ddl_name="Tight",
+        resource_scale="S",
+        safety_config=SAFETY_CONFIG,
     )
 
 
@@ -226,7 +263,7 @@ class DemonstrationDatasetTests(unittest.TestCase):
         self.assertTrue(
             record["feasibility"]["safe_demonstration"]
         )
-        self.assertEqual(record["trajectory_count"]["total"], 3)
+        self.assertEqual(record["trajectory_count"]["total"], 2)
 
     def _append_manager_identity_dataset(self):
         heuristic_ids = ("traditional_edf", "rule_B")
@@ -307,13 +344,65 @@ class DemonstrationDatasetTests(unittest.TestCase):
         )
         self.assertEqual(len(loaded["episodes"]), 1)
 
+    def test_runtime_identity_mismatches_are_rejected(self):
+        self._append_manager_identity_dataset()
+        mismatches = {
+            "expected_scenario_code": "MS",
+            "expected_source_scenario": "MS",
+            "expected_ddl_name": "Loose",
+            "expected_resource_scale": "M",
+            "expected_worker_action_dim": 3,
+            "expected_num_vms": 3,
+        }
+        for field, value in mismatches.items():
+            expected = dict(EXPECTED_DEMO_CONTEXT)
+            expected[field] = value
+            with self.subTest(field=field), self.assertRaisesRegex(
+                ValueError, "mismatch"
+            ):
+                load_demonstration_split(
+                    self.manifest_path,
+                    "train",
+                    **expected,
+                )
+
+    def test_each_qc_safety_config_mismatch_is_rejected(self):
+        self._append_manager_identity_dataset()
+        for field in SAFETY_CONFIG:
+            changed = dict(SAFETY_CONFIG)
+            value = changed[field]
+            if isinstance(value, bool):
+                changed[field] = not value
+            elif isinstance(value, str):
+                changed[field] = value + "_changed"
+            else:
+                changed[field] = float(value) + 0.25
+            expected = dict(EXPECTED_DEMO_CONTEXT)
+            expected["expected_safety_config"] = changed
+            with self.subTest(field=field), self.assertRaisesRegex(
+                ValueError, field
+            ):
+                load_demonstration_split(
+                    self.manifest_path,
+                    "train",
+                    **expected,
+                )
+
     def test_legacy_manifest_requires_regeneration_for_llm_only(self):
-        append_demonstration_episode(
-            self.manifest_path,
-            _episode("train.safe", "train", 1, 11),
-            seed_split=_seed_split(),
+        self.manifest_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "layer_dimensions": {
+                        "manager": {},
+                        "host": {},
+                        "vm": {},
+                    },
+                }
+            ),
+            encoding="utf-8",
         )
-        with self.assertRaisesRegex(ValueError, "regenerate"):
+        with self.assertRaisesRegex(ValueError, r"legacy Host\+VM"):
             load_demonstration_split(
                 self.manifest_path,
                 "train",
@@ -480,6 +569,14 @@ class OfflinePretrainingTests(unittest.TestCase):
                 sync_targets_after_pretraining=False,
                 random_seed=5,
             ),
+            scenario_code="SS",
+            source_scenario="SS",
+            ddl_name="Tight",
+            ddl_setting={"name": "test"},
+            resource_scale="S",
+            worker_action_dim=2,
+            num_vms=2,
+            safety_config=SAFETY_CONFIG,
             manager_heuristic_ids=self.manager_heuristic_ids,
             manager_heuristic_manifest_sha256=(
                 self.manager_manifest_sha256
@@ -573,6 +670,9 @@ class RealGenerationSmokeTests(unittest.TestCase):
             fuzzy_energy_uncertainty_weight=1.0,
             fuzzy_resource_seed=31,
             fuzzy_use_deadline_constraint=True,
+            scenario_code="SS",
+            task_code="S",
+            resource_code="S",
         )
         episode = generate_safe_demonstration_episode(
             environment,
@@ -581,6 +681,8 @@ class RealGenerationSmokeTests(unittest.TestCase):
                 workflow_seed=31,
                 resource_seed=31,
                 split="train",
+                source_scenario="SS",
+                ddl_name="Tight",
                 max_manager_phases=1000,
             ),
         )
@@ -589,7 +691,7 @@ class RealGenerationSmokeTests(unittest.TestCase):
             episode.generator_policy,
             SAFE_DEMONSTRATION_GENERATOR_POLICY,
         )
-        for layer in ("manager", "host", "vm"):
+        for layer in ("manager", "worker"):
             self.assertTrue(episode.trajectories[layer])
             for transition in episode.trajectories[layer]:
                 self.assertIsInstance(
@@ -597,7 +699,7 @@ class RealGenerationSmokeTests(unittest.TestCase):
                 )
         resource_sources = {
             row.action_source
-            for layer in ("host", "vm")
+            for layer in ("worker",)
             for row in episode.trajectories[layer]
         }
         self.assertTrue(

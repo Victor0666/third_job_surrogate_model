@@ -92,6 +92,20 @@
           "workflow_seed": 103,
           "arrival_seed": 103,
           "resource_seed": 103
+        },
+        {
+          "case_id": "validation_seed_104",
+          "episode_seed": 104,
+          "workflow_seed": 104,
+          "arrival_seed": 104,
+          "resource_seed": 104
+        },
+        {
+          "case_id": "validation_seed_105",
+          "episode_seed": 105,
+          "workflow_seed": 105,
+          "arrival_seed": 105,
+          "resource_seed": 105
         }
       ],
       "final_test": [
@@ -387,11 +401,12 @@
       "manager_inputs": [
         "safe_manager_observation"
       ],
-      "host_inputs": [
-        "safe_host_observation"
-      ],
+      "host_inputs": [],
       "vm_inputs": [
-        "safe_vm_observation"
+        "global_safe_vm_worker_observation",
+        "global_vm_legal_mask",
+        "global_vm_safety_mask",
+        "global_vm_final_mask"
       ],
       "llm_rule_inputs": [],
       "llm_rule_outputs": []
@@ -401,11 +416,12 @@
         "safe_manager_observation",
         "available_heuristic_mask"
       ],
-      "host_inputs": [
-        "safe_host_observation"
-      ],
+      "host_inputs": [],
       "vm_inputs": [
-        "safe_vm_observation"
+        "global_safe_vm_worker_observation",
+        "global_vm_legal_mask",
+        "global_vm_safety_mask",
+        "global_vm_final_mask"
       ],
       "llm_rule_inputs": [
         "min_exec_time",
@@ -572,8 +588,8 @@
         "llm_enabled": false,
         "llm_rule_mode": "none",
         "llm_host_vm_access": false,
-        "host_policy": "learned_safe_d3qn",
-        "vm_policy": "learned_safe_d3qn",
+        "host_policy": "implicit_in_global_vm_action",
+        "vm_policy": "global_safe_d3qn_worker",
         "safe_rl": true,
         "safety_cost_recording": true,
         "safety_value_network": true,
@@ -606,8 +622,8 @@
         "llm_enabled": true,
         "llm_rule_mode": "manager_selects_admitted_rule",
         "llm_host_vm_access": false,
-        "host_policy": "learned_safe_d3qn",
-        "vm_policy": "learned_safe_d3qn",
+        "host_policy": "implicit_in_global_vm_action",
+        "vm_policy": "global_safe_d3qn_worker",
         "safe_rl": true,
         "safety_cost_recording": true,
         "safety_value_network": true,
@@ -641,8 +657,8 @@
         "llm_enabled": true,
         "llm_rule_mode": "manager_selects_admitted_rule",
         "llm_host_vm_access": false,
-        "host_policy": "learned_safe_d3qn",
-        "vm_policy": "learned_safe_d3qn",
+        "host_policy": "implicit_in_global_vm_action",
+        "vm_policy": "global_safe_d3qn_worker",
         "safe_rl": true,
         "safety_cost_recording": true,
         "safety_value_network": true,

@@ -326,7 +326,9 @@ def protocol_from_config(
         scenario=scenario,
         ddl_setting=ddl,
         train_seeds=tuple(seeds.get("training", (1, 2, 3, 4, 5))),
-        validation_seeds=tuple(seeds.get("validation", (101, 102, 103))),
+        validation_seeds=tuple(
+            seeds.get("validation", (101, 102, 103, 104, 105))
+        ),
         test_seeds=tuple(seeds.get("final_test", range(201, 231))),
         deadline_cache_path=(
             str(deadline_cache_path)

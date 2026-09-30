@@ -256,8 +256,7 @@ class ParameterizedTopKTests(unittest.TestCase):
         self.assertTrue(all(action.available for action in demo_actions))
         self.assertFalse(formal.curriculum_enabled)
         self.assertEqual(formal.safe_rl.safety_discount, 0.99)
-        self.assertTrue(formal.safe_rl.replay.host_use_per)
-        self.assertTrue(formal.safe_rl.replay.vm_use_per)
+        self.assertTrue(formal.safe_rl.replay.worker_use_per)
         self.assertFalse(formal.safe_rl.replay.manager_use_per)
 
     def test_demo_environment_kwargs_forward_qc_config(self):

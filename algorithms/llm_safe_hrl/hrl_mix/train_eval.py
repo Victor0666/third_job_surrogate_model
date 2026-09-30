@@ -6,9 +6,9 @@
 
 1. train.py 调用 train_runner.train()。
 2. train_runner.py 在每个 episode 结束时调用
-   evaluate_hrl_three_layer_multi_seed()。
-3. evaluate_hrl_three_layer_multi_seed() 使用当前训练好的
-   VM、Host、Manager agent，在指定 eval_seeds 上执行确定性评估。
+   evaluate_hrl_two_level_multi_seed()。
+3. evaluate_hrl_two_level_multi_seed() 使用当前训练好的
+   Global Worker、Manager agent，在指定 eval_seeds 上执行确定性评估。
 4. 评估结果返回给 train_runner.py，由 train_runner.py
    写入日志并判断是否保存 best checkpoint。
 
@@ -17,8 +17,7 @@
 - 只负责评估，不负责训练参数解析、环境创建配置、模型保存或日志字段定义。
 - 评估时使用 deterministic=True，尽量反映当前策略本身的效果，
   而不是探索噪声。
-- 多 seed 结果取平均，返回 VM reward、Host reward、
-  Manager reward 和总能耗。
+- 多 seed 结果取平均，返回 Worker reward、Manager reward 和总能耗。
 """
 
 from __future__ import annotations
@@ -183,8 +182,7 @@ def evaluation_ctor_kwargs(
 def evaluate_one_seed(
     env_cls,
     env_kwargs,
-    vm_agent,
-    host_agent,
+    worker_agent,
     manager_agent,
     seed,
     *,
@@ -195,9 +193,8 @@ def evaluate_one_seed(
     Returns:
 
     (
-        avg_vm,
-        avg_host,
-        avg_mgr,
+        avg_worker,
+        avg_manager,
         total_energy,
         record,
     )
@@ -272,64 +269,23 @@ def evaluate_one_seed(
 
     phases = 0
     ret_mgr = 0.0
-    ret_vm_phase_mean = 0.0
-    ret_host_phase_mean = 0.0
+    ret_worker_phase_mean = 0.0
 
     # ============================================================
     # Episode loop
     # ============================================================
     while not done:
-        vm_rewards = []
-        host_rewards = []
+        worker_rewards = []
 
         # --------------------------------------------------------
         # One Manager phase
         # --------------------------------------------------------
         while True:
-            (
-                st_host,
-                has_next,
-            ) = (
-                eval_env
-                .get_host_state_for_next_assignment()
+            st_vm, has_next = (
+                eval_env.get_global_vm_state_for_current_task()
             )
 
             if not has_next:
-                break
-
-            (
-                a_host,
-                _,
-                _,
-            ) = select_layer_action(
-                host_agent,
-                st_host,
-                safe_rl_enabled=bool(
-                    getattr(
-                        eval_env,
-                        "safe_rl_enabled",
-                        False,
-                    )
-                ),
-                deterministic=True,
-                count_step=False,
-            )
-
-            eval_env.host_select(
-                int(
-                    a_host
-                )
-            )
-
-            (
-                st_vm,
-                ok_vm,
-            ) = (
-                eval_env
-                .get_vm_state_for_current_task()
-            )
-
-            if not ok_vm:
                 break
 
             (
@@ -337,7 +293,7 @@ def evaluate_one_seed(
                 _,
                 _,
             ) = select_layer_action(
-                vm_agent,
+                worker_agent,
                 st_vm,
                 safe_rl_enabled=bool(
                     getattr(
@@ -350,11 +306,7 @@ def evaluate_one_seed(
                 count_step=False,
             )
 
-            (
-                r_host,
-                r_vm,
-                info_task,
-            ) = eval_env.vm_assign(
+            r_vm, info_task = eval_env.global_vm_assign(
                 int(
                     a_vm
                 )
@@ -365,19 +317,7 @@ def evaluate_one_seed(
                 "safe_rl_enabled",
                 False,
             ):
-                host_rewards.append(
-                    float(
-                        info_task.get(
-                            "total_performance_reward",
-                            info_task.get(
-                                "performance_reward_host",
-                                r_host,
-                            ),
-                        )
-                    )
-                )
-
-                vm_rewards.append(
+                worker_rewards.append(
                     float(
                         info_task.get(
                             "total_performance_reward",
@@ -390,13 +330,7 @@ def evaluate_one_seed(
                 )
 
             else:
-                host_rewards.append(
-                    float(
-                        r_host
-                    )
-                )
-
-                vm_rewards.append(
+                worker_rewards.append(
                     float(
                         r_vm
                     )
@@ -440,27 +374,14 @@ def evaluate_one_seed(
                 r_manager_raw
             )
 
-        ret_vm_phase_mean += (
+        ret_worker_phase_mean += (
             float(
                 np.mean(
-                    vm_rewards
+                    worker_rewards
                 )
             )
             if len(
-                vm_rewards
-            )
-            > 0
-            else 0.0
-        )
-
-        ret_host_phase_mean += (
-            float(
-                np.mean(
-                    host_rewards
-                )
-            )
-            if len(
-                host_rewards
+                worker_rewards
             )
             > 0
             else 0.0
@@ -507,16 +428,8 @@ def evaluate_one_seed(
     # ============================================================
     # Single-seed result
     # ============================================================
-    avg_vm = (
-        ret_vm_phase_mean
-        / max(
-            phases,
-            1,
-        )
-    )
-
-    avg_host = (
-        ret_host_phase_mean
+    avg_worker = (
+        ret_worker_phase_mean
         / max(
             phases,
             1,
@@ -555,8 +468,7 @@ def evaluate_one_seed(
         )
 
     return (
-        avg_vm,
-        avg_host,
+        avg_worker,
         avg_mgr,
         total_energy,
         record,
@@ -574,35 +486,25 @@ def aggregate_seed_results(
     Keeping seed order unchanged avoids floating-point reduction
     differences caused by non-associative arithmetic.
     """
-    vm_list = [
+    worker_list = [
         row[0]
         for row in seed_results
     ]
 
-    host_list = [
+    mgr_list = [
         row[1]
         for row in seed_results
     ]
 
-    mgr_list = [
-        row[2]
-        for row in seed_results
-    ]
-
     energy_list = [
-        row[3]
+        row[2]
         for row in seed_results
     ]
 
     base_result = (
         float(
             np.mean(
-                vm_list
-            )
-        ),
-        float(
-            np.mean(
-                host_list
+                worker_list
             )
         ),
         float(
@@ -623,7 +525,7 @@ def aggregate_seed_results(
     safety_metrics = (
         aggregate_safe_metric_records(
             [
-                row[4]
+                row[3]
                 for row
                 in seed_results
             ]
@@ -652,11 +554,10 @@ def aggregate_seed_results(
     )
 
 
-def evaluate_hrl_three_layer_multi_seed(
+def evaluate_hrl_two_level_multi_seed(
     env_cls,
     env_kwargs,
-    vm_agent,
-    host_agent,
+    worker_agent,
     manager_agent,
     seeds,
     *,
@@ -664,7 +565,7 @@ def evaluate_hrl_three_layer_multi_seed(
     evaluation_pool=None,
     seed_result_callback=None,
 ):
-    """Evaluate the current three-layer HRL policy on multiple seeds.
+    """Evaluate the current Manager + Global Worker policy on multiple seeds.
 
     Parameters
     ----------
@@ -700,8 +601,7 @@ def evaluate_hrl_three_layer_multi_seed(
             seed_result = evaluate_one_seed(
                 env_cls,
                 env_kwargs,
-                vm_agent,
-                host_agent,
+                worker_agent,
                 manager_agent,
                 sd,
                 return_safety_metrics=(
@@ -771,6 +671,10 @@ def evaluate_hrl_three_layer_multi_seed(
     )
 
 
+# Deprecated compatibility alias; new code uses the two-level name above.
+evaluate_hrl_three_layer_multi_seed = evaluate_hrl_two_level_multi_seed
+
+
 # 墙钟时间在串行和并行模式下不可直接比较。
 _WALL_CLOCK_METRIC_FIELDS = (
     "scheduling_time_seconds",
@@ -815,13 +719,12 @@ def assert_seed_results_identical(
             right,
         ) in zip(
             (
-                "avg_vm",
-                "avg_host",
-                "avg_mgr",
+                "avg_worker",
+                "avg_manager",
                 "total_energy",
             ),
-            got[:4],
-            want[:4],
+            got[:3],
+            want[:3],
         ):
             if float(
                 left
@@ -838,8 +741,8 @@ def assert_seed_results_identical(
             got_record,
             want_record,
         ) = (
-            got[4],
-            want[4],
+            got[3],
+            want[3],
         )
 
         if (
@@ -890,8 +793,7 @@ def assert_seed_results_identical(
 def evaluate_and_save_safe_hrl_final_test(
     env_cls,
     env_kwargs,
-    vm_agent,
-    host_agent,
+    worker_agent,
     manager_agent,
     *,
     training_seeds,
@@ -979,11 +881,10 @@ def evaluate_and_save_safe_hrl_final_test(
             )
 
     result = (
-        evaluate_hrl_three_layer_multi_seed(
+        evaluate_hrl_two_level_multi_seed(
             env_cls,
             env_kwargs,
-            vm_agent,
-            host_agent,
+            worker_agent,
             manager_agent,
             split[
                 "final_test"

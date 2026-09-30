@@ -28,7 +28,7 @@ import numpy as np
 import torch
 
 from base.d3qn_agent import D3QNAgent
-from base.hrl_env import CloudWorkflowEnv_VMAgents, MANAGER_ACTION_TABLE
+from base.hrl_env import GlobalSafeVMEnv, MANAGER_ACTION_TABLE
 
 
 NUM_OPTIONS = int(MANAGER_ACTION_TABLE.shape[0])
@@ -43,7 +43,7 @@ def set_seed(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
-def manager_apply_action(env: CloudWorkflowEnv_VMAgents, act_idx: int) -> None:
+def manager_apply_action(env: GlobalSafeVMEnv, act_idx: int) -> None:
     """按环境声明的 Manager 模式应用权重增量或启发式索引。"""
     if hasattr(env, "apply_manager_action"):
         env.apply_manager_action(int(act_idx))
@@ -53,7 +53,7 @@ def manager_apply_action(env: CloudWorkflowEnv_VMAgents, act_idx: int) -> None:
     env.apply_manager_delta(delta)
 
 
-def manager_action_dim(env: CloudWorkflowEnv_VMAgents) -> int:
+def manager_action_dim(env: GlobalSafeVMEnv) -> int:
     """从实际 Manager mask 推断动作维度，避免硬编码 243。"""
     mask = np.asarray(
         env.get_manager_action_mask(),
@@ -400,7 +400,7 @@ def safe_replay_metadata(
     }
 
 
-def apply_env_scales(env: CloudWorkflowEnv_VMAgents, cfg) -> None:
+def apply_env_scales(env: GlobalSafeVMEnv, cfg) -> None:
     """把配置中的 reward 缩放和归一化参数写入训练环境。"""
     env.energy_reward_scale = cfg.energy_reward_scale
     env.task_baseline_norm = cfg.task_baseline_norm
@@ -409,7 +409,7 @@ def apply_env_scales(env: CloudWorkflowEnv_VMAgents, cfg) -> None:
     env.alpha_delay_vm = cfg.alpha_delay_vm
 
 
-def sync_env_scales(eval_env: CloudWorkflowEnv_VMAgents, env_kwargs: dict) -> None:
+def sync_env_scales(eval_env: GlobalSafeVMEnv, env_kwargs: dict) -> None:
     """把训练时使用的尺度参数同步到评估环境。"""
     scale_keys = [
         "energy_reward_scale",
@@ -423,7 +423,7 @@ def sync_env_scales(eval_env: CloudWorkflowEnv_VMAgents, env_kwargs: dict) -> No
             setattr(eval_env, key, env_kwargs[key])
 
 
-def compute_episode_task_lateness_metrics(env: CloudWorkflowEnv_VMAgents) -> tuple[float, float, float]:
+def compute_episode_task_lateness_metrics(env: GlobalSafeVMEnv) -> tuple[float, float, float]:
     """计算当前 episode 的任务迟延和工作流平均迟延。
 
     返回值：
@@ -476,27 +476,22 @@ def warmup_ready(agent: D3QNAgent, frac: float = 0.1) -> bool:
     return len(agent.buffer) >= need
 
 
-def print_device_info(vm_agent: D3QNAgent, host_agent: D3QNAgent, manager_agent: D3QNAgent) -> None:
-    """打印 CUDA 可用性以及三个 agent 当前所在设备。"""
+def print_device_info(worker_agent: D3QNAgent, manager_agent: D3QNAgent) -> None:
+    """打印 CUDA 可用性以及 Manager/Worker 当前所在设备。"""
     print("torch.cuda.is_available():", torch.cuda.is_available())
     print("torch.cuda.device_count():", torch.cuda.device_count())
     if torch.cuda.is_available():
         print("current_device:", torch.cuda.current_device())
         print("device_name:", torch.cuda.get_device_name(torch.cuda.current_device()))
-    print("vm_agent online device:", next(vm_agent.online.parameters()).device)
-    print("host_agent online device:", next(host_agent.online.parameters()).device)
+    print("worker_agent online device:", next(worker_agent.online.parameters()).device)
     print("manager_agent online device:", next(manager_agent.online.parameters()).device)
     if all(
         agent.safe_rl_enabled
-        for agent in (vm_agent, host_agent, manager_agent)
+        for agent in (worker_agent, manager_agent)
     ):
         print(
-            "vm_agent q_c device:",
-            next(vm_agent.q_c_online.parameters()).device,
-        )
-        print(
-            "host_agent q_c device:",
-            next(host_agent.q_c_online.parameters()).device,
+            "worker_agent q_c device:",
+            next(worker_agent.q_c_online.parameters()).device,
         )
         print(
             "manager_agent q_c device:",

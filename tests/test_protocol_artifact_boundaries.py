@@ -34,6 +34,12 @@ from algorithms.llm_safe_hrl.scenario_registry import (
 
 class _Agent:
     safe_rl_enabled = True
+    input_dim = 3
+    output_dim = 2
+    hidden_dims = (512, 256)
+    gamma = 0.99
+    safety_discount = 0.99
+    observation_schema_version = "test_v1"
 
     def save(self, path, *, lagrange_controller_state=None):
         Path(path).write_text("{}", encoding="utf-8")
@@ -198,7 +204,7 @@ class ProtocolArtifactBoundaryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             agents = {
                 name: _Agent()
-                for name in ("manager", "host", "vm")
+                for name in ("manager", "worker")
             }
             manifest = save_best_checkpoint_bundle(
                 directory,
@@ -241,7 +247,7 @@ class ProtocolArtifactBoundaryTests(unittest.TestCase):
             target = Path(directory) / "invalid_bundle"
             agents = {
                 name: _Agent()
-                for name in ("manager", "host", "vm")
+                for name in ("manager", "worker")
             }
             with self.assertRaises(ValueError):
                 save_best_checkpoint_bundle(
@@ -261,7 +267,7 @@ class ProtocolArtifactBoundaryTests(unittest.TestCase):
 
     def test_best_checkpoint_rejects_cross_protocol_load(self):
         with tempfile.TemporaryDirectory() as directory:
-            agents = {name: _Agent() for name in ("manager", "host", "vm")}
+            agents = {name: _Agent() for name in ("manager", "worker")}
             manifest = save_best_checkpoint_bundle(
                 directory,
                 agents=agents,
@@ -285,7 +291,7 @@ class ProtocolArtifactBoundaryTests(unittest.TestCase):
 
     def test_legacy_best_checkpoint_is_readable_only_without_expectation(self):
         with tempfile.TemporaryDirectory() as directory:
-            agents = {name: _Agent() for name in ("manager", "host", "vm")}
+            agents = {name: _Agent() for name in ("manager", "worker")}
             manifest = save_best_checkpoint_bundle(
                 directory,
                 agents=agents,
@@ -316,7 +322,7 @@ class ProtocolArtifactBoundaryTests(unittest.TestCase):
             root = Path(directory)
             plan = load_safe_training_plan(_plan(root))
             controller = SafeTrainingController(plan)
-            agents = {name: _Agent() for name in ("manager", "host", "vm")}
+            agents = {name: _Agent() for name in ("manager", "worker")}
             checkpoint = save_pipeline_checkpoint(
                 root / "checkpoint",
                 controller=controller,
@@ -324,7 +330,8 @@ class ProtocolArtifactBoundaryTests(unittest.TestCase):
                 lagrange_controller=_Lagrange(),
                 global_step=0,
                 next_episode=0,
-                best_model_metrics=None,
+                best_feasible_metrics=None,
+                best_fallback_metrics=None,
                 replay_metadata={name: {} for name in agents},
                 heuristic_library_version={"manifest_version": "v1"},
                 config_snapshot=_identity_config(self.single),

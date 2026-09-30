@@ -22,16 +22,31 @@ from base.safe_replay import (
 )
 
 
-SAFE_DEMONSTRATION_DATASET_SCHEMA_VERSION = 1
-SAFE_DEMONSTRATION_EPISODE_SCHEMA_VERSION = 1
+SAFE_DEMONSTRATION_DATASET_SCHEMA_VERSION = 3
+SAFE_DEMONSTRATION_EPISODE_SCHEMA_VERSION = 3
 SAFE_DEMONSTRATION_GENERATOR_POLICY = (
-    "safe_heuristic_fixed_vm_deterministic_fallback_v1"
+    "safe_heuristic_global_vm_deterministic_fallback_v3"
 )
-DEMONSTRATION_LAYERS = ("manager", "host", "vm")
+DEMONSTRATION_LAYERS = ("manager", "worker")
 TRAINING_SPLITS = frozenset({"train", "validation"})
 ALL_SPLITS = frozenset({"train", "validation", "final_test"})
 
 _SAFE_ID = re.compile(r"^[A-Za-z0-9_.-]+$")
+_UNSET = object()
+
+DEMONSTRATION_SAFETY_CONFIG_FIELDS = (
+    "shield_enabled",
+    "fallback_controller",
+    "deadline_eta",
+    "fuzzy_use_deadline_constraint",
+    "process_risk_aggregation",
+    "predicted_violation_weight",
+    "actual_violation_weight",
+    "lateness_weight",
+    "positive_delta_risk_weight",
+    "lateness_normalizer",
+    "lateness_clip",
+)
 
 
 def _canonical_json_sha256(value) -> str:
@@ -123,6 +138,102 @@ def _validate_manager_heuristic_identity(
             "Manager heuristic manifest hash mismatch between "
             "demonstration and current training"
         )
+
+
+def _ddl_identity(ddl_setting: Mapping) -> dict:
+    if not isinstance(ddl_setting, Mapping):
+        raise ValueError("ddl_setting must be a mapping")
+    return {
+        str(key): value
+        for key, value in ddl_setting.items()
+        if str(key) != "workflow_deadlines"
+    }
+
+
+def _validate_safety_config(value: Mapping, label: str) -> dict:
+    if not isinstance(value, Mapping):
+        raise ValueError(f"{label} must be a mapping")
+    config = dict(value)
+    missing = [
+        field
+        for field in DEMONSTRATION_SAFETY_CONFIG_FIELDS
+        if field not in config
+    ]
+    if missing:
+        raise ValueError(
+            f"{label} is missing required Qc/shield fields {missing}; "
+            "regenerate the demonstration"
+        )
+    for field in (
+        "deadline_eta",
+        "predicted_violation_weight",
+        "actual_violation_weight",
+        "lateness_weight",
+        "positive_delta_risk_weight",
+        "lateness_normalizer",
+        "lateness_clip",
+    ):
+        _finite(config[field], f"{label}.{field}")
+    return config
+
+
+def _same_config_value(left, right) -> bool:
+    if isinstance(left, (int, float)) and isinstance(right, (int, float)):
+        return math.isclose(float(left), float(right), rel_tol=0.0, abs_tol=1e-12)
+    return left == right
+
+
+def _validate_expected_safety_config(
+    stored: Mapping,
+    expected: Mapping | None,
+) -> None:
+    stored_config = _validate_safety_config(
+        stored,
+        "demonstration safety_config",
+    )
+    if expected is None:
+        return
+    expected_config = _validate_safety_config(
+        expected,
+        "current training safety_config",
+    )
+    mismatches = [
+        field
+        for field in DEMONSTRATION_SAFETY_CONFIG_FIELDS
+        if not _same_config_value(
+            stored_config[field], expected_config[field]
+        )
+    ]
+    if mismatches:
+        raise ValueError(
+            "demonstration safety/Qc config mismatch: "
+            + ", ".join(mismatches)
+        )
+
+
+def demonstration_safety_config(environment) -> dict:
+    """Return the exact shield/Qc identity bound to a demonstration."""
+    return {
+        "shield_enabled": bool(environment.safe_rl_shield_enabled),
+        "fallback_controller": str(environment.safe_rl_fallback_controller),
+        "deadline_eta": float(environment.fuzzy_deadline_eta),
+        "fuzzy_use_deadline_constraint": bool(
+            environment.fuzzy_use_deadline_constraint
+        ),
+        "process_risk_aggregation": str(
+            environment.safe_rl_process_risk_aggregation
+        ),
+        "predicted_violation_weight": float(
+            environment.safe_rl_predicted_violation_weight
+        ),
+        "actual_violation_weight": float(environment.safe_rl_violation_weight),
+        "lateness_weight": float(environment.safe_rl_lateness_weight),
+        "positive_delta_risk_weight": float(
+            environment.safe_rl_delta_risk_weight
+        ),
+        "lateness_normalizer": float(environment.safe_rl_lateness_normalizer),
+        "lateness_clip": float(environment.safe_rl_lateness_clip),
+    }
 
 
 def _finite(value, name: str) -> float:
@@ -372,7 +483,7 @@ class DemonstrationSafetyStandard:
 
 @dataclass(frozen=True)
 class SafeDemonstrationEpisode:
-    """一个三层示范 episode 及其可复算安全标签。"""
+    """一个 Manager + Global Worker 示范 episode。"""
 
     episode_id: str
     split: str
@@ -388,6 +499,11 @@ class SafeDemonstrationEpisode:
     episode_metrics: Mapping
     trajectories: Mapping[str, Sequence[SafeReplayTransition]]
     safety_standard: DemonstrationSafetyStandard
+    scenario_code: str
+    source_scenario: str | None
+    ddl_name: str
+    resource_scale: str
+    safety_config: Mapping
 
     def __post_init__(self) -> None:
         identifier = str(self.episode_id).strip()
@@ -414,13 +530,32 @@ class SafeDemonstrationEpisode:
             raise ValueError("ddl_setting must be a mapping")
         if not isinstance(self.fuzzy_parameters, Mapping):
             raise ValueError("fuzzy_parameters must be a mapping")
+        scenario_code = str(self.scenario_code).strip().upper()
+        source_scenario = (
+            None
+            if self.source_scenario in (None, "")
+            else str(self.source_scenario).strip().upper()
+        )
+        ddl_name = str(self.ddl_name).strip()
+        resource_scale = str(self.resource_scale).strip().upper()
+        if len(scenario_code) != 2 or resource_scale not in {"S", "M", "L"}:
+            raise ValueError("invalid demonstration scenario/resource scale")
+        if scenario_code[1] != resource_scale:
+            raise ValueError("scenario and resource scale mismatch")
+        if source_scenario is not None and len(source_scenario) != 2:
+            raise ValueError("invalid demonstration source_scenario")
+        if not ddl_name:
+            raise ValueError("demonstration ddl_name must not be empty")
+        safety_config = _validate_safety_config(
+            self.safety_config,
+            "demonstration safety_config",
+        )
         observation_schemas = dict(
             self.observation_schema_versions
         )
         if set(observation_schemas) != set(DEMONSTRATION_LAYERS):
             raise ValueError(
-                "observation_schema_versions must contain manager, "
-                "host and vm"
+                "observation_schema_versions must contain manager and worker"
             )
         if any(
             not str(observation_schemas[layer]).strip()
@@ -464,7 +599,7 @@ class SafeDemonstrationEpisode:
         trajectories = dict(self.trajectories)
         if set(trajectories) != set(DEMONSTRATION_LAYERS):
             raise ValueError(
-                "trajectories must contain manager, host and vm layers"
+                "trajectories must contain manager and worker layers"
             )
         copied = {}
         for layer in DEMONSTRATION_LAYERS:
@@ -502,6 +637,11 @@ class SafeDemonstrationEpisode:
         )
         object.__setattr__(self, "episode_metrics", metrics)
         object.__setattr__(self, "trajectories", copied)
+        object.__setattr__(self, "scenario_code", scenario_code)
+        object.__setattr__(self, "source_scenario", source_scenario)
+        object.__setattr__(self, "ddl_name", ddl_name)
+        object.__setattr__(self, "resource_scale", resource_scale)
+        object.__setattr__(self, "safety_config", safety_config)
 
     @property
     def safety_evaluation(self) -> tuple[bool, list[str]]:
@@ -558,8 +698,19 @@ class SafeDemonstrationEpisode:
             "heuristic_version": str(self.heuristic_version),
             "workflow_seed": int(self.workflow_seed),
             "resource_seed": int(self.resource_seed),
+            "scenario_code": self.scenario_code,
+            "source_scenario": self.source_scenario,
+            "ddl_name": self.ddl_name,
+            "resource_scale": self.resource_scale,
+            "worker_action_dim": int(
+                self.layer_dimensions["worker"]["action_dim"]
+            ),
+            "num_vms": int(
+                self.layer_dimensions["worker"]["action_dim"]
+            ),
             "ddl_setting": dict(self.ddl_setting),
             "fuzzy_parameters": dict(self.fuzzy_parameters),
+            "safety_config": dict(self.safety_config),
             "observation_schema_versions": dict(
                 self.observation_schema_versions
             ),
@@ -636,8 +787,13 @@ class SafeDemonstrationEpisode:
             heuristic_version=payload["heuristic_version"],
             workflow_seed=payload["workflow_seed"],
             resource_seed=payload["resource_seed"],
+            scenario_code=payload["scenario_code"],
+            source_scenario=payload["source_scenario"],
+            ddl_name=payload["ddl_name"],
+            resource_scale=payload["resource_scale"],
             ddl_setting=payload["ddl_setting"],
             fuzzy_parameters=payload["fuzzy_parameters"],
+            safety_config=payload["safety_config"],
             observation_schema_versions=payload[
                 "observation_schema_versions"
             ],
@@ -689,8 +845,19 @@ def _manifest_episode_record(
         "heuristic_version": str(episode.heuristic_version),
         "resource_seed": int(episode.resource_seed),
         "workflow_seed": int(episode.workflow_seed),
+        "scenario_code": episode.scenario_code,
+        "source_scenario": episode.source_scenario,
+        "ddl_name": episode.ddl_name,
+        "resource_scale": episode.resource_scale,
+        "worker_action_dim": int(
+            episode.layer_dimensions["worker"]["action_dim"]
+        ),
+        "num_vms": int(
+            episode.layer_dimensions["worker"]["action_dim"]
+        ),
         "ddl_setting": dict(episode.ddl_setting),
         "fuzzy_parameters": dict(episode.fuzzy_parameters),
+        "safety_config": dict(episode.safety_config),
         "observation_schema_versions": dict(
             episode.observation_schema_versions
         ),
@@ -748,6 +915,10 @@ def append_demonstration_episode(
         manager_heuristic_ids,
         manager_heuristic_manifest_sha256,
     )
+    if manager_identity is None:
+        raise ValueError(
+            "v2 demonstrations require ordered Top-K IDs and manifest hash"
+        )
     if path.exists():
         manifest = json.loads(path.read_text(encoding="utf-8"))
         if (
@@ -755,7 +926,8 @@ def append_demonstration_episode(
             != SAFE_DEMONSTRATION_DATASET_SCHEMA_VERSION
         ):
             raise ValueError(
-                "safe demonstration dataset schema mismatch"
+                "safe demonstration dataset schema mismatch; regenerate "
+                "the demonstration with schema v3 Qc/shield identity"
             )
         if (
             manifest.get("generator_policy")
@@ -797,6 +969,16 @@ def append_demonstration_episode(
                 manager_identity[0],
                 manager_identity[1],
             )
+            if manifest.get("manager_heuristic_order_sha256") != (
+                _canonical_json_sha256(list(manager_identity[0]))
+            ):
+                raise ValueError("Manager Top-K order hash mismatch")
+            if manifest.get("manager_heuristic_manifest_identity") != (
+                f"sha256:{manager_identity[1]}"
+            ):
+                raise ValueError(
+                    "Manager Top-K manifest identity/hash mismatch"
+                )
     else:
         if not str(dataset_id).strip():
             raise ValueError("dataset_id must not be empty")
@@ -815,6 +997,18 @@ def append_demonstration_episode(
             "safe_replay_transition_schema_version": (
                 SAFE_REPLAY_TRANSITION_SCHEMA_VERSION
             ),
+            "scenario_code": episode.scenario_code,
+            "source_scenario": episode.source_scenario,
+            "ddl_name": episode.ddl_name,
+            "ddl_setting": _ddl_identity(episode.ddl_setting),
+            "resource_scale": episode.resource_scale,
+            "worker_action_dim": int(
+                episode.layer_dimensions["worker"]["action_dim"]
+            ),
+            "num_vms": int(
+                episode.layer_dimensions["worker"]["action_dim"]
+            ),
+            "safety_config": dict(episode.safety_config),
             "seed_split": seed_split.to_dict(),
             "safety_standard": (
                 episode.safety_standard.to_dict()
@@ -825,8 +1019,14 @@ def append_demonstration_episode(
             manifest["manager_heuristic_ids"] = list(
                 manager_identity[0]
             )
+            manifest["manager_heuristic_order_sha256"] = (
+                _canonical_json_sha256(list(manager_identity[0]))
+            )
             manifest["manager_heuristic_manifest_sha256"] = (
                 manager_identity[1]
+            )
+            manifest["manager_heuristic_manifest_identity"] = (
+                f"sha256:{manager_identity[1]}"
             )
     entries = manifest.get("episodes")
     if not isinstance(entries, list):
@@ -849,6 +1049,24 @@ def append_demonstration_episode(
             "demonstration layer dimensions cannot change in one "
             "dataset"
         )
+    for key, expected in (
+        ("scenario_code", episode.scenario_code),
+        ("source_scenario", episode.source_scenario),
+        ("ddl_name", episode.ddl_name),
+        ("ddl_setting", _ddl_identity(episode.ddl_setting)),
+        ("resource_scale", episode.resource_scale),
+        (
+            "worker_action_dim",
+            int(episode.layer_dimensions["worker"]["action_dim"]),
+        ),
+        (
+            "num_vms",
+            int(episode.layer_dimensions["worker"]["action_dim"]),
+        ),
+        ("safety_config", dict(episode.safety_config)),
+    ):
+        if manifest.get(key) != expected:
+            raise ValueError(f"demonstration manifest {key} mismatch")
     if manager_identity is not None:
         manager_action_dim = int(
             episode.layer_dimensions["manager"]["action_dim"]
@@ -964,6 +1182,14 @@ def load_demonstration_split(
     require_safe: bool = True,
     expected_manager_heuristic_ids: Sequence[str] | None = None,
     expected_manager_heuristic_manifest_sha256: str | None = None,
+    expected_scenario_code: str | None = None,
+    expected_source_scenario=_UNSET,
+    expected_ddl_name: str | None = None,
+    expected_ddl_setting: Mapping | None = None,
+    expected_resource_scale: str | None = None,
+    expected_worker_action_dim: int | None = None,
+    expected_num_vms: int | None = None,
+    expected_safety_config: Mapping | None = None,
 ) -> dict:
     """严格加载 train/validation；final_test 永不作为预训练数据返回。"""
     selected_split = str(split).strip().lower()
@@ -974,12 +1200,21 @@ def load_demonstration_split(
         )
     path = Path(manifest_path).resolve()
     manifest = json.loads(path.read_text(encoding="utf-8"))
+    legacy_dimensions = manifest.get("layer_dimensions", {})
+    if "host" in legacy_dimensions or "host" in manifest.get(
+        "observation_schema_versions", {}
+    ):
+        raise ValueError(
+            "legacy Host+VM demonstration schema is not supported; "
+            "regenerate Manager+GlobalWorker demonstrations"
+        )
     if (
         manifest.get("schema_version")
         != SAFE_DEMONSTRATION_DATASET_SCHEMA_VERSION
     ):
         raise ValueError(
-            "safe demonstration dataset schema mismatch"
+            "safe demonstration dataset schema mismatch; regenerate "
+            "the demonstration with schema v3 Qc/shield identity"
         )
     if (
         manifest.get("generator_policy")
@@ -988,6 +1223,68 @@ def load_demonstration_split(
         raise ValueError(
             "safe demonstration generator policy mismatch"
         )
+    required_identity = (
+        "scenario_code",
+        "source_scenario",
+        "ddl_name",
+        "ddl_setting",
+        "resource_scale",
+        "worker_action_dim",
+        "num_vms",
+        "manager_heuristic_ids",
+        "manager_heuristic_order_sha256",
+        "manager_heuristic_manifest_sha256",
+        "manager_heuristic_manifest_identity",
+        "safety_config",
+        "observation_schema_versions",
+    )
+    missing = [key for key in required_identity if key not in manifest]
+    if missing:
+        raise ValueError(
+            f"demonstration manifest is missing v2 identity fields: {missing}"
+        )
+    if int(manifest["worker_action_dim"]) != int(manifest["num_vms"]):
+        raise ValueError("worker_action_dim must equal num_vms")
+    stored_ids, stored_manifest_hash = _manager_heuristic_identity(
+        manifest["manager_heuristic_ids"],
+        manifest["manager_heuristic_manifest_sha256"],
+    )
+    expected_identity = {
+        "scenario_code": expected_scenario_code,
+        "source_scenario": expected_source_scenario,
+        "ddl_name": expected_ddl_name,
+        "ddl_setting": (
+            None
+            if expected_ddl_setting is None
+            else _ddl_identity(expected_ddl_setting)
+        ),
+        "resource_scale": expected_resource_scale,
+        "worker_action_dim": expected_worker_action_dim,
+        "num_vms": expected_num_vms,
+    }
+    for field, expected in expected_identity.items():
+        if expected is _UNSET:
+            continue
+        if expected is None and field != "source_scenario":
+            continue
+        if manifest.get(field) != expected:
+            raise ValueError(
+                f"demonstration manifest {field} mismatch between "
+                "dataset and current training"
+            )
+    _validate_expected_safety_config(
+        manifest["safety_config"],
+        expected_safety_config,
+    )
+    expected_order_hash = _canonical_json_sha256(
+        list(stored_ids)
+    )
+    if manifest["manager_heuristic_order_sha256"] != expected_order_hash:
+        raise ValueError("Manager Top-K order hash mismatch")
+    if manifest["manager_heuristic_manifest_identity"] != (
+        f"sha256:{stored_manifest_hash}"
+    ):
+        raise ValueError("Manager Top-K manifest identity/hash mismatch")
     expected_manifest_hash = manifest.get(
         "manifest_content_sha256"
     )
@@ -1049,8 +1346,19 @@ def load_demonstration_split(
             "heuristic_version": episode.heuristic_version,
             "workflow_seed": episode.workflow_seed,
             "resource_seed": episode.resource_seed,
+            "scenario_code": episode.scenario_code,
+            "source_scenario": episode.source_scenario,
+            "ddl_name": episode.ddl_name,
+            "resource_scale": episode.resource_scale,
+            "worker_action_dim": int(
+                episode.layer_dimensions["worker"]["action_dim"]
+            ),
+            "num_vms": int(
+                episode.layer_dimensions["worker"]["action_dim"]
+            ),
             "ddl_setting": episode.ddl_setting,
             "fuzzy_parameters": episode.fuzzy_parameters,
+            "safety_config": episode.safety_config,
             "observation_schema_versions": (
                 episode.observation_schema_versions
             ),
@@ -1064,6 +1372,24 @@ def load_demonstration_split(
             if record.get(field) != expected:
                 raise ValueError(
                     "demonstration manifest/episode mismatch: "
+                    f"{field}"
+                )
+        for field, expected in (
+            ("scenario_code", manifest["scenario_code"]),
+            ("source_scenario", manifest["source_scenario"]),
+            ("ddl_name", manifest["ddl_name"]),
+            ("resource_scale", manifest["resource_scale"]),
+            ("worker_action_dim", manifest["worker_action_dim"]),
+            ("num_vms", manifest["num_vms"]),
+            ("safety_config", manifest["safety_config"]),
+            (
+                "observation_schema_versions",
+                manifest["observation_schema_versions"],
+            ),
+        ):
+            if record.get(field) != expected:
+                raise ValueError(
+                    "demonstration dataset/episode identity mismatch: "
                     f"{field}"
                 )
         if (
@@ -1121,5 +1447,6 @@ __all__ = [
     "DemonstrationSafetyStandard",
     "StrictSeedSplit",
     "append_demonstration_episode",
+    "demonstration_safety_config",
     "load_demonstration_split",
 ]

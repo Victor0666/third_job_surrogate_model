@@ -74,7 +74,7 @@ from protocol_config import apply_seevo_scenario_config
 
 
 RESULT_JSON_PREFIX = "RESULT_JSON="
-LLM_EVOLUTION_FORBIDDEN_SEEDS = frozenset({101, 102, 103}).union(range(201, 231))
+LLM_EVOLUTION_FORBIDDEN_SEEDS = frozenset(range(101, 106)).union(range(201, 231))
 
 
 def _config_mapping(value, label: str) -> dict:

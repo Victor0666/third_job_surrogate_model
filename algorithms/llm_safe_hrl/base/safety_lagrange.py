@@ -101,6 +101,13 @@ class LagrangeSafetyController:
         """兼容 Agent 命名的只读别名。"""
         return float(self.current_lambda)
 
+    def set_cost_budget(self, cost_budget: float) -> None:
+        """Update the configured progress-scheduled budget."""
+        value = float(cost_budget)
+        if not math.isfinite(value) or value < 0.0:
+            raise ValueError("cost_budget must be finite and non-negative")
+        self.cost_budget = value
+
     def observe_episode(
         self,
         *,
@@ -254,7 +261,6 @@ class LagrangeSafetyController:
                 "lambda_lr": self.lambda_lr,
                 "lambda_min": self.lambda_min,
                 "lambda_max": self.lambda_max,
-                "cost_budget": self.cost_budget,
                 "update_interval": self.update_interval,
                 "cost_ema_factor": self.cost_ema_factor,
                 "warmup_steps": self.warmup_steps,
@@ -289,6 +295,7 @@ class LagrangeSafetyController:
             )
 
         self.current_lambda = current_lambda
+        self.cost_budget = float(state["cost_budget"])
         self.mean_safety_cost = mean_cost
         self.last_episode_safety_cost = last_cost
         has_violation_rate_state = (

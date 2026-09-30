@@ -119,8 +119,7 @@ class FinalSafeHRLAcceptanceTests(unittest.TestCase):
             hard_max_steps=100_000,
             save_dir=str(output_root / "checkpoints"),
             log_path=str(output_root / "logs" / "train.csv"),
-            vm_agent=self._small_agent_config(base.vm_agent),
-            host_agent=self._small_agent_config(base.host_agent),
+            worker_agent=self._small_agent_config(base.worker_agent),
             manager_agent=self._small_agent_config(
                 base.manager_agent
             ),
@@ -226,7 +225,7 @@ class FinalSafeHRLAcceptanceTests(unittest.TestCase):
         self.assertTrue(any(row["type"] == "episode" for row in rows))
         self.assertNotIn("safety_cost", rows[0])
 
-        for layer in ("manager", "host", "vm"):
+        for layer in ("manager", "worker"):
             checkpoint = (
                 output_root
                 / "checkpoints"
@@ -263,7 +262,7 @@ class FinalSafeHRLAcceptanceTests(unittest.TestCase):
             self.assertIn(key, metrics)
         self.assertEqual(
             manifest["selection_policy"],
-            "feasibility_first_lexicographic",
+            "dual_track_feasible_then_fallback_v1",
         )
         self.assertIn("replay_metadata", manifest)
         self.assertIn("config_snapshot", manifest)
@@ -298,7 +297,7 @@ class FinalSafeHRLAcceptanceTests(unittest.TestCase):
                     ).is_file()
                 )
 
-        for layer in ("manager", "host", "vm"):
+        for layer in ("manager", "worker"):
             checkpoint = checkpoint_dir / f"{layer}_final.pth"
             restored = self._restore_checkpoint(checkpoint)
             self.assertTrue(restored.safe_rl_enabled)

@@ -124,7 +124,7 @@ class SafetyShieldConfig:
 
 @dataclass(frozen=True)
 class SafetyStateConfig:
-    """阶段 6 三层安全 observation 配置，默认关闭。"""
+    """阶段 6 两层安全 observation 配置，默认关闭。"""
 
     enabled: bool = False
     high_uncertainty_threshold: float = 0.2
@@ -140,11 +140,43 @@ class LagrangianSafetyConfig:
     lambda_lr: float = 0.05
     lambda_min: float = 0.0
     lambda_max: float = 100.0
-    cost_budget: float = 0.01
+    cost_budget: float = 0.02
+    cost_budget_schedule: tuple[tuple[float, float], ...] = (
+        (0.25, 0.02),
+        (350.0 / 600.0, 0.01),
+        (1.0, 0.005),
+    )
     update_interval: int = 1
     cost_ema_factor: float = 0.9
     # 单位是已经完成并观测的 episode 数，不是 transition/global step。
     warmup_steps: int = 0
+
+    def __post_init__(self) -> None:
+        schedule = tuple(
+            (float(progress), float(budget))
+            for progress, budget in self.cost_budget_schedule
+        )
+        if not schedule:
+            raise ValueError("cost_budget_schedule must not be empty")
+        previous = 0.0
+        for progress, budget in schedule:
+            if not math.isfinite(progress) or not previous < progress <= 1.0:
+                raise ValueError(
+                    "cost budget progress bounds must increase within (0, 1]"
+                )
+            if not math.isfinite(budget) or budget < 0.0:
+                raise ValueError("cost budgets must be finite and non-negative")
+            previous = progress
+        if not math.isclose(schedule[-1][0], 1.0, abs_tol=1e-12):
+            raise ValueError("cost_budget_schedule must end at progress 1.0")
+        object.__setattr__(self, "cost_budget_schedule", schedule)
+
+    def budget_for_progress(self, progress: float) -> float:
+        value = min(max(float(progress), 0.0), 1.0)
+        for upper, budget in self.cost_budget_schedule:
+            if value <= float(upper):
+                return float(budget)
+        return float(self.cost_budget_schedule[-1][1])
 
 
 @dataclass(frozen=True)
@@ -153,8 +185,7 @@ class SafetyReplayConfig:
 
     transition_schema_version: int = 1
     near_boundary_margin: float = 1.0
-    host_use_per: bool = True
-    vm_use_per: bool = True
+    worker_use_per: bool = True
     manager_use_per: bool = False
     combined_per_priority: bool = True
     performance_td_weight: float = 1.0
@@ -392,7 +423,8 @@ class SafeRLConfig:
     process_risk_aggregation: str = "mean"
     lateness_normalizer: float = 300.0
     lateness_clip: float = 5.0
-    delta_risk_weight: float = 0.5
+    delta_risk_weight: float = 0.1
+    predicted_violation_weight: float = 1.0
     violation_weight: float = 1.0
     lateness_weight: float = 1.0
     shield: SafetyShieldConfig = field(
@@ -434,6 +466,10 @@ class SafeRLConfig:
         for name, value in (
             ("lateness_clip", self.lateness_clip),
             ("delta_risk_weight", self.delta_risk_weight),
+            (
+                "predicted_violation_weight",
+                self.predicted_violation_weight,
+            ),
             ("violation_weight", self.violation_weight),
             ("lateness_weight", self.lateness_weight),
         ):
@@ -520,9 +556,8 @@ class TrainConfig:
     # 安全强化学习分阶段配置。enabled=False 时保持原 HRL reward/replay 语义。
     safe_rl: SafeRLConfig
 
-    # 三层智能体的独立配置。
-    vm_agent: AgentConfig
-    host_agent: AgentConfig
+    # Manager 与 Global Safe-VM Worker 的独立配置。
+    worker_agent: AgentConfig
     manager_agent: AgentConfig
 
 
@@ -747,6 +782,15 @@ def build_train_config(
     deadline_cache_override: str | Path | None = None,
     deadline_cache_paths: Mapping[str, str] | None = None,
     safe_rl_lambda_lr: float = 0.05,
+    safe_rl_predicted_violation_weight: float = 1.0,
+    safe_rl_actual_violation_weight: float = 1.0,
+    safe_rl_lateness_weight: float = 1.0,
+    safe_rl_positive_delta_risk_weight: float = 0.1,
+    safe_rl_cost_budget_schedule: tuple[tuple[float, float], ...] = (
+        (0.25, 0.02),
+        (350.0 / 600.0, 0.01),
+        (1.0, 0.005),
+    ),
 ) -> TrainConfig:
     """根据命令行参数构造完整训练配置。
 
@@ -1109,6 +1153,13 @@ def build_train_config(
     os.makedirs(save_dir, exist_ok=True)
     os.makedirs(log_path.parent, exist_ok=True)
 
+    normalized_budget_schedule = tuple(
+        (float(progress), float(budget))
+        for progress, budget in safe_rl_cost_budget_schedule
+    )
+    if not normalized_budget_schedule:
+        raise ValueError("safe_rl_cost_budget_schedule cannot be empty")
+
     return TrainConfig(
         experiment_protocol=(
             protocol_context.identity()
@@ -1182,9 +1233,16 @@ def build_train_config(
             process_risk_aggregation="mean",
             lateness_normalizer=300.0,
             lateness_clip=5.0,
-            delta_risk_weight=0.5,
-            violation_weight=1.0,
-            lateness_weight=1.0,
+            delta_risk_weight=float(
+                safe_rl_positive_delta_risk_weight
+            ),
+            predicted_violation_weight=float(
+                safe_rl_predicted_violation_weight
+            ),
+            violation_weight=float(
+                safe_rl_actual_violation_weight
+            ),
+            lateness_weight=float(safe_rl_lateness_weight),
             shield=SafetyShieldConfig(
                 enabled=bool(safe_rl_shield_enabled),
                 fallback_controller="fixed_vm_rule",
@@ -1200,7 +1258,8 @@ def build_train_config(
                 lambda_lr=float(safe_rl_lambda_lr),
                 lambda_min=0.0,
                 lambda_max=100.0,
-                cost_budget=0.01,
+                cost_budget=float(normalized_budget_schedule[0][1]),
+                cost_budget_schedule=normalized_budget_schedule,
                 update_interval=1,
                 cost_ema_factor=0.9,
                 warmup_steps=0,
@@ -1208,8 +1267,7 @@ def build_train_config(
             replay=SafetyReplayConfig(
                 transition_schema_version=1,
                 near_boundary_margin=1.0,
-                host_use_per=True,
-                vm_use_per=True,
+                worker_use_per=True,
                 manager_use_per=False,
                 combined_per_priority=True,
                 performance_td_weight=1.0,
@@ -1339,9 +1397,9 @@ def build_train_config(
                 convergence_window=5,
             ),
         ),
-        vm_agent=AgentConfig(
+        worker_agent=AgentConfig(
             lr=3e-4,
-            gamma=0.95,
+            gamma=0.99,
             batch_size=256,
             buffer_size=120000,
             eps_start=1.0,
@@ -1349,19 +1407,7 @@ def build_train_config(
             eps_decay_steps=80000,
             target_update_tau=0.005,
             grad_clip=10.0,
-            hidden_dims=(1024, 1024, 512, 512, 256),
-        ),
-        host_agent=AgentConfig(
-            lr=3e-4,
-            gamma=0.95,
-            batch_size=256,
-            buffer_size=120000,
-            eps_start=1.0,
-            eps_end=0.05,
-            eps_decay_steps=80000,
-            target_update_tau=0.005,
-            grad_clip=10.0,
-            hidden_dims=(1024, 1024, 512, 512, 256),
+            hidden_dims=(512, 256),
         ),
         manager_agent=AgentConfig(
             lr=3e-4,
@@ -1373,6 +1419,6 @@ def build_train_config(
             eps_decay_steps=40000,
             target_update_tau=0.01,
             grad_clip=10.0,
-            hidden_dims=(512, 512, 256, 128),
+            hidden_dims=(512, 256),
         ),
     )

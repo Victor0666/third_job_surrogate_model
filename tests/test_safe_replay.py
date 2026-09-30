@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
+import tempfile
 import unittest
 
 import numpy as np
@@ -93,9 +95,10 @@ class SafeReplayTransitionTests(unittest.TestCase):
     def test_replay_config_validates_schema_threshold_and_td_weights(self):
         config = SafetyReplayConfig()
         self.assertEqual(config.transition_schema_version, 1)
-        self.assertTrue(config.host_use_per)
-        self.assertTrue(config.vm_use_per)
+        self.assertTrue(config.worker_use_per)
         self.assertFalse(config.manager_use_per)
+        self.assertFalse(hasattr(config, "host_use_per"))
+        self.assertFalse(hasattr(config, "vm_use_per"))
         self.assertTrue(config.combined_per_priority)
         with self.assertRaises(ValueError):
             SafetyReplayConfig(transition_schema_version=99)
@@ -356,23 +359,23 @@ class SafeReplayAgentTests(unittest.TestCase):
         )
 
     @staticmethod
-    def _remember(agent):
+    def _remember(agent, *, reward=2.0, cost=4.0):
         agent.remember(
             np.asarray([1.0, 2.0], dtype=np.float32),
             np.asarray([1.0, 0.0, 0.0], dtype=np.float32),
             0,
-            2.0,
+            reward,
             np.asarray([3.0, 4.0], dtype=np.float32),
             np.zeros(3, dtype=np.float32),
             1.0,
-            cost=4.0,
+            cost=cost,
             proposed_action=0,
             legal_action_mask=np.asarray([1.0, 1.0, 0.0]),
             safety_action_mask=np.asarray([1.0, 0.0, 0.0]),
             fuzzy_safety_margin=2.0,
             predicted_risk_finish=10.0,
             manager_phase_id=5,
-            performance_reward_components=_components(2.0),
+            performance_reward_components=_components(reward),
         )
 
     def test_replay_state_dict_round_trip_and_schema_guard(self):
@@ -452,17 +455,52 @@ class SafeReplayAgentTests(unittest.TestCase):
                 torch.nn.init.constant_(parameter, 0.0)
         self._remember(agent)
         agent.update()
-        # done=1 且初始 Q=0，因此 |delta_r|=2、|delta_c|=4。
-        # (1*2 + 3*4) / (1+3) = 3.5。
+        # 两路 TD 误差分别由各自 EMA 归一化，首个样本均为 1。
+        # priority = 1 * 1 + 3 * 1 (+ epsilon)。
         self.assertAlmostEqual(
             agent.priorities[0],
-            3.500001,
+            4.000001,
             places=5,
         )
         self.assertEqual(
             agent.last_update_info["per_priority_mode"],
-            "combined_performance_safety_td",
+            "ema_normalized_performance_safety_td",
         )
+
+    def test_zero_td_ema_normalization_is_finite_and_checkpointed(self):
+        agent = self._agent(use_per=True, combined=True)
+        for network in (
+            agent.online,
+            agent.target,
+            agent.q_c_online,
+            agent.q_c_target,
+        ):
+            for parameter in network.parameters():
+                torch.nn.init.constant_(parameter, 0.0)
+        self._remember(agent, reward=0.0, cost=0.0)
+        agent.update()
+        self.assertTrue(np.isfinite(agent.priorities[0]))
+        self.assertAlmostEqual(agent.priorities[0], 1e-6)
+        self.assertEqual(
+            agent.last_update_info[
+                "performance_td_error_abs_mean_normalized"
+            ],
+            0.0,
+        )
+        self.assertEqual(
+            agent.last_update_info[
+                "safety_td_error_abs_mean_normalized"
+            ],
+            0.0,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint = Path(directory) / "worker.pth"
+            agent.save(str(checkpoint))
+            restored = self._agent(use_per=True, combined=True)
+            restored.load(str(checkpoint))
+        self.assertTrue(restored.safe_per_ema_initialized)
+        self.assertEqual(restored.safe_per_reward_td_ema, 0.0)
+        self.assertEqual(restored.safe_per_safety_td_ema, 0.0)
 
     def test_per_list_uses_agent_capacity_for_warmup(self):
         agent = self._agent(use_per=True, combined=True)

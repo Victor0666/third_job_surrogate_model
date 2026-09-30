@@ -12,7 +12,11 @@ from typing import Any, Mapping
 import numpy as np
 
 from . import LLM_SAFE_HRL_ROOT  # noqa: F401
-from hrl_mix.model_selection import FeasibilityFirstModelMetrics, is_better_model
+from hrl_mix.model_selection import (
+    FeasibilityFirstModelMetrics,
+    is_better_fallback_model,
+    is_better_feasible_model,
+)
 
 from .evaluation import ComparisonPolicy, evaluate_policy, make_environment, run_episode
 from .protocol import FuzzyComparisonProtocol
@@ -132,12 +136,16 @@ def train_baseline(
     root.mkdir(parents=True, exist_ok=True)
     train_log = root / "training_metrics.jsonl"
     validation_log = root / "validation_metrics.jsonl"
-    checkpoint = root / "best_checkpoint.pt"
-    checkpoint_identity_path = root / "checkpoint_identity.json"
+    feasible_checkpoint = root / "best_feasible.pt"
+    fallback_checkpoint = root / "best_fallback.pt"
+    feasible_identity_path = root / "best_feasible_identity.json"
+    fallback_identity_path = root / "best_fallback_identity.json"
     reward_values = dict(reward_config or {})
     seed_everything(int(optimizer_seed))
-    incumbent: FeasibilityFirstModelMetrics | None = None
-    best_episode = 0
+    best_feasible: FeasibilityFirstModelMetrics | None = None
+    best_fallback: FeasibilityFirstModelMetrics | None = None
+    best_feasible_episode = 0
+    best_fallback_episode = 0
 
     for episode in range(1, int(episodes) + 1):
         seed = int(protocol.train_seeds[(episode - 1) % len(protocol.train_seeds)])
@@ -182,15 +190,28 @@ def train_baseline(
             "seed_records": list(validation.records),
         }
         _append_jsonl(validation_log, validation_payload)
-        if is_better_model(validation.model_selection, incumbent):
-            incumbent = validation.model_selection
-            best_episode = int(episode)
-            policy.save(str(checkpoint))
+        if is_better_feasible_model(validation.model_selection, best_feasible):
+            best_feasible = validation.model_selection
+            best_feasible_episode = int(episode)
+            policy.save(str(feasible_checkpoint))
             _write_json(
-                checkpoint_identity_path,
-                _checkpoint_identity(protocol, checkpoint),
+                feasible_identity_path,
+                _checkpoint_identity(protocol, feasible_checkpoint),
+            )
+        if is_better_fallback_model(validation.model_selection, best_fallback):
+            best_fallback = validation.model_selection
+            best_fallback_episode = int(episode)
+            policy.save(str(fallback_checkpoint))
+            _write_json(
+                fallback_identity_path,
+                _checkpoint_identity(protocol, fallback_checkpoint),
             )
 
+    incumbent = best_feasible or best_fallback
+    checkpoint = feasible_checkpoint if best_feasible is not None else fallback_checkpoint
+    checkpoint_identity_path = (
+        feasible_identity_path if best_feasible is not None else fallback_identity_path
+    )
     if incumbent is None or not checkpoint.is_file():
         raise RuntimeError("training produced no validated checkpoint")
     _validate_checkpoint_identity(
@@ -236,8 +257,24 @@ def train_baseline(
         "validation_interval": int(validation_interval),
         "optimizer_seed": int(optimizer_seed),
         "deadline_cache_paths": dict(protocol.deadline_cache_paths),
-        "best_episode": int(best_episode),
+        "best_episode": int(
+            best_feasible_episode if best_feasible is not None else best_fallback_episode
+        ),
         "best_validation": incumbent.to_dict(),
+        "best_feasible": (
+            None if best_feasible is None else best_feasible.to_dict()
+        ),
+        "best_fallback": (
+            None if best_fallback is None else best_fallback.to_dict()
+        ),
+        "best_feasible_episode": int(best_feasible_episode),
+        "best_fallback_episode": int(best_fallback_episode),
+        "best_feasible_checkpoint": (
+            feasible_checkpoint.name if best_feasible is not None else None
+        ),
+        "best_fallback_checkpoint": (
+            fallback_checkpoint.name if best_fallback is not None else None
+        ),
         "checkpoint_path": checkpoint.name,
         "checkpoint_sha256": _file_hash(checkpoint),
         "checkpoint_identity": checkpoint_identity_path.name,

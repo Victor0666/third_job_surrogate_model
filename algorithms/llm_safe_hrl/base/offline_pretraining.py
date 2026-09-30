@@ -1,4 +1,4 @@
-"""用安全示范轨迹离线初始化三层 Q_r/Q_c 和可选行为倾向。
+"""用安全示范轨迹离线初始化 Manager/GlobalVMWorker 的 Q_r/Q_c。
 
 本模块不调用 :meth:`D3QNAgent.update`，不推进 epsilon、在线 update 计数或
 PER 状态，也不改变 target 更新频率。离线 epoch 内 target 网络保持冻结；
@@ -104,11 +104,14 @@ def _validate_agents_and_dataset(
 ) -> None:
     if set(agents) != set(DEMONSTRATION_LAYERS):
         raise ValueError(
-            "offline pretraining agents must contain manager, host "
-            "and vm"
+            "offline pretraining agents must contain manager and worker"
         )
     dimensions = manifest.get("layer_dimensions", {})
     schemas = manifest.get("observation_schema_versions", {})
+    if int(manifest.get("worker_action_dim", -1)) != int(
+        manifest.get("num_vms", -2)
+    ):
+        raise ValueError("demonstration worker_action_dim/num_vms mismatch")
     for layer in DEMONSTRATION_LAYERS:
         agent = agents[layer]
         if not isinstance(agent, D3QNAgent):
@@ -362,10 +365,18 @@ def pretrain_agents_from_demonstrations(
     agents: Mapping[str, D3QNAgent],
     options: OfflinePretrainingOptions,
     *,
+    scenario_code: str,
+    source_scenario: str | None,
+    ddl_name: str,
+    ddl_setting: Mapping,
+    resource_scale: str,
+    worker_action_dim: int,
+    num_vms: int,
+    safety_config: Mapping,
     manager_heuristic_ids: Sequence[str] | None = None,
     manager_heuristic_manifest_sha256: str | None = None,
 ) -> dict:
-    """在严格 train/validation 数据上离线初始化三层双价值网络。"""
+    """在严格 train/validation 数据上初始化 Manager 与 Global Worker。"""
     if not options.enabled:
         return {
             "enabled": False,
@@ -379,6 +390,14 @@ def pretrain_agents_from_demonstrations(
         expected_manager_heuristic_manifest_sha256=(
             manager_heuristic_manifest_sha256
         ),
+        expected_scenario_code=scenario_code,
+        expected_source_scenario=source_scenario,
+        expected_ddl_name=ddl_name,
+        expected_ddl_setting=ddl_setting,
+        expected_resource_scale=resource_scale,
+        expected_worker_action_dim=worker_action_dim,
+        expected_num_vms=num_vms,
+        expected_safety_config=safety_config,
     )
     validation_data = load_demonstration_split(
         options.dataset_manifest_path,
@@ -388,6 +407,14 @@ def pretrain_agents_from_demonstrations(
         expected_manager_heuristic_manifest_sha256=(
             manager_heuristic_manifest_sha256
         ),
+        expected_scenario_code=scenario_code,
+        expected_source_scenario=source_scenario,
+        expected_ddl_name=ddl_name,
+        expected_ddl_setting=ddl_setting,
+        expected_resource_scale=resource_scale,
+        expected_worker_action_dim=worker_action_dim,
+        expected_num_vms=num_vms,
+        expected_safety_config=safety_config,
     )
     if (
         train_data["manifest"]["manifest_content_sha256"]

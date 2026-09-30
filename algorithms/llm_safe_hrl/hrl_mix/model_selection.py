@@ -29,8 +29,8 @@ from base.safe_replay import (
 )
 
 
-MODEL_SELECTION_SCHEMA_VERSION = 1
-BEST_CHECKPOINT_MANIFEST_SCHEMA_VERSION = 1
+MODEL_SELECTION_SCHEMA_VERSION = 2
+BEST_CHECKPOINT_MANIFEST_SCHEMA_VERSION = 2
 CONFIG_SNAPSHOT_SCHEMA_VERSION = 1
 
 _PROTOCOL_IDENTITY_FIELDS = (
@@ -46,7 +46,10 @@ _PROTOCOL_IDENTITY_FIELDS = (
 )
 
 MODEL_COMPARISON_FIELDS = (
-    "deadline_violation_rate",
+    "selection_track",
+    "worst_seed_violation",
+    "aggregate_violation",
+    "worst_seed_lateness",
     "max_fuzzy_lateness",
     "mean_fuzzy_lateness",
     "fuzzy_energy_score",
@@ -150,14 +153,26 @@ class FeasibilityFirstModelMetrics:
         )
 
     @property
-    def comparison_key(self) -> tuple[float, float, float, float]:
-        """Exact feasibility-first key requested by the experiment protocol."""
+    def feasible_key(self) -> tuple[float]:
+        return (self.fuzzy_energy_score,)
+
+    @property
+    def fallback_key(self) -> tuple[float, ...]:
         return (
+            self.worst_seed_violation,
             self.deadline_violation_rate,
+            self.worst_seed_lateness,
             self.max_fuzzy_lateness,
             self.mean_fuzzy_lateness,
             self.fuzzy_energy_score,
         )
+
+    @property
+    def comparison_key(self) -> tuple[float, ...]:
+        """Resolved key retained for shared backward-compatible comparisons."""
+        if self.all_seed_feasible:
+            return (0.0, *self.feasible_key)
+        return (1.0, *self.fallback_key)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -165,6 +180,12 @@ class FeasibilityFirstModelMetrics:
                 MODEL_SELECTION_SCHEMA_VERSION
             ),
             **asdict(self),
+            "aggregate_violation": self.deadline_violation_rate,
+            "selection_track": (
+                "best_feasible"
+                if self.all_seed_feasible
+                else "best_fallback"
+            ),
             "comparison_key_fields": list(
                 MODEL_COMPARISON_FIELDS
             ),
@@ -217,6 +238,26 @@ def is_better_model(
     return candidate.comparison_key < incumbent.comparison_key
 
 
+def is_better_feasible_model(
+    candidate: FeasibilityFirstModelMetrics,
+    incumbent: FeasibilityFirstModelMetrics | None,
+) -> bool:
+    """Compare only all-seed-zero-violation feasible candidates."""
+    if not candidate.all_seed_feasible:
+        return False
+    return incumbent is None or candidate.feasible_key < incumbent.feasible_key
+
+
+def is_better_fallback_model(
+    candidate: FeasibilityFirstModelMetrics,
+    incumbent: FeasibilityFirstModelMetrics | None,
+) -> bool:
+    """Compare only infeasible candidates on the shared fallback ordering."""
+    if candidate.all_seed_feasible:
+        return False
+    return incumbent is None or candidate.fallback_key < incumbent.fallback_key
+
+
 def aggregate_seed_feasibility_metrics(
     seed_records: Sequence[Mapping[str, Any]],
 ) -> dict[str, Any]:
@@ -266,7 +307,6 @@ def aggregate_seed_feasibility_metrics(
             evaluation_completed
             and completed_count > 0
             and violation_count == 0
-            and max_lateness == 0.0
         )
         normalized.append(
             {
@@ -354,7 +394,7 @@ def aggregate_seed_feasibility_metrics(
 
 
 def build_replay_metadata(agent: Any) -> dict[str, Any]:
-    """Build replay audit metadata without embedding replay transitions."""
+    """Build replay audit metadata for the per-agent checkpoint payload."""
     safe_enabled = bool(
         getattr(agent, "safe_rl_enabled", False)
     )
@@ -389,7 +429,7 @@ def build_replay_metadata(agent: Any) -> dict[str, Any]:
         "risk_category_counts": dict(
             sorted(category_counts.items())
         ),
-        "replay_transitions_embedded": False,
+        "replay_transitions_embedded": safe_enabled,
     }
 
 
@@ -572,12 +612,12 @@ def save_best_checkpoint_bundle(
     config_snapshot: Mapping[str, Any],
     experiment_protocol=None,
 ) -> str:
-    """Atomically bind three Agent files to one feasibility-first manifest."""
+    """Atomically bind Manager + Global Worker to a dual-track manifest."""
     target_dir = Path(directory).resolve()
-    expected_layers = {"manager", "host", "vm"}
+    expected_layers = {"manager", "worker"}
     if set(agents) != expected_layers:
         raise ValueError(
-            "best checkpoint bundle requires manager/host/vm agents"
+            "best checkpoint bundle requires manager/worker agents"
         )
     if set(replay_metadata) != expected_layers:
         raise ValueError(
@@ -615,13 +655,14 @@ def save_best_checkpoint_bundle(
     deadline_cache_paths = dict(config.get("deadline_cache_paths", {}))
 
     target_dir.mkdir(parents=True, exist_ok=True)
+    track = (
+        "best_feasible"
+        if model_metrics.all_seed_feasible
+        else "best_fallback"
+    )
     checkpoint_files = {}
     for layer in sorted(expected_layers):
-        filename = (
-            "best_manager.pth"
-            if layer == "manager"
-            else f"best_{layer}.pth"
-        )
+        filename = f"{track}_{layer}.pth"
         agents[layer].save(
             str(target_dir / filename),
             lagrange_controller_state=lagrange_state,
@@ -632,13 +673,28 @@ def save_best_checkpoint_bundle(
         "checkpoint_manifest_schema_version": (
             BEST_CHECKPOINT_MANIFEST_SCHEMA_VERSION
         ),
-        "selection_policy": "feasibility_first_lexicographic",
+        "selection_policy": "dual_track_feasible_then_fallback_v1",
+        "selection_track": track,
         "optimizer_seed": optimizer_seed,
         "deadline_cache_paths": deadline_cache_paths,
         "model_selection_metrics": model_metrics.to_dict(),
         "agent_checkpoints": checkpoint_files,
+        "agent_architectures": {
+            layer: {
+                "input_dim": int(agents[layer].input_dim),
+                "action_dim": int(agents[layer].output_dim),
+                "hidden_dims": list(agents[layer].hidden_dims),
+                "performance_gamma": float(agents[layer].gamma),
+                "safety_gamma": float(agents[layer].safety_discount),
+                "observation_schema_version": str(
+                    agents[layer].observation_schema_version
+                ),
+            }
+            for layer in sorted(expected_layers)
+        },
         "agent_checkpoint_contents": {
             layer: {
+                "checkpoint_schema_version": 6,
                 "q_r": {
                     "online_key": "online",
                     "target_key": "target",
@@ -652,6 +708,14 @@ def save_best_checkpoint_bundle(
                 "lagrange_multiplier_key": (
                     "lagrange_multiplier"
                 ),
+                "performance_discount_key": "performance_discount",
+                "safety_discount_key": "safety_discount",
+                "replay_state_key": "replay_state",
+                "per_normalization_keys": [
+                    "safe_per_reward_td_ema",
+                    "safe_per_safety_td_ema",
+                    "safe_per_ema_initialized",
+                ],
             }
             for layer in sorted(expected_layers)
         },
@@ -665,19 +729,29 @@ def save_best_checkpoint_bundle(
     }
     if protocol_identity is not None:
         payload["experiment_protocol"] = protocol_identity
-    manifest_path = target_dir / "best_checkpoint_manifest.json"
-    temporary_path = target_dir / "best_checkpoint_manifest.json.tmp"
-    with temporary_path.open("w", encoding="utf-8") as handle:
-        json.dump(
-            payload,
-            handle,
-            ensure_ascii=False,
-            allow_nan=False,
-            sort_keys=True,
-            indent=2,
+    def write_manifest(manifest_path):
+        temporary_path = manifest_path.with_suffix(
+            manifest_path.suffix + ".tmp"
         )
-        handle.write("\n")
-    os.replace(temporary_path, manifest_path)
+        with temporary_path.open("w", encoding="utf-8") as handle:
+            json.dump(
+                payload,
+                handle,
+                ensure_ascii=False,
+                allow_nan=False,
+                sort_keys=True,
+                indent=2,
+            )
+            handle.write("\n")
+        os.replace(temporary_path, manifest_path)
+
+    manifest_path = target_dir / f"{track}_manifest.json"
+    write_manifest(manifest_path)
+    canonical = target_dir / "best_checkpoint_manifest.json"
+    if track == "best_feasible" or not (
+        target_dir / "best_feasible_manifest.json"
+    ).is_file():
+        write_manifest(canonical)
     return str(manifest_path)
 
 
@@ -688,6 +762,22 @@ def read_best_checkpoint_manifest(
 ) -> dict[str, Any]:
     """Read a best bundle and optionally reject cross-protocol loading."""
     source = Path(path).resolve()
+    if source.is_dir():
+        source = next(
+            (
+                candidate
+                for candidate in (
+                    source / "best_feasible_manifest.json",
+                    source / "best_fallback_manifest.json",
+                    source / "best_checkpoint_manifest.json",
+                )
+                if candidate.is_file()
+            ),
+            source / "best_checkpoint_manifest.json",
+        )
+    feasible = source.parent / "best_feasible_manifest.json"
+    if source.name == "best_checkpoint_manifest.json" and feasible.is_file():
+        source = feasible
     with source.open("r", encoding="utf-8") as handle:
         payload = json.load(handle)
     if not isinstance(payload, Mapping):
@@ -701,8 +791,7 @@ def read_best_checkpoint_manifest(
     checkpoints = payload.get("agent_checkpoints")
     if not isinstance(checkpoints, Mapping) or set(checkpoints) != {
         "manager",
-        "host",
-        "vm",
+        "worker",
     }:
         raise ValueError("best checkpoint manifest layer set mismatch")
     actual_identity = payload.get("experiment_protocol")
@@ -763,6 +852,8 @@ __all__ = [
     "build_config_snapshot",
     "build_heuristic_library_version",
     "build_replay_metadata",
+    "is_better_fallback_model",
+    "is_better_feasible_model",
     "is_better_model",
     "protocol_identity_from_config_snapshot",
     "read_best_checkpoint_manifest",

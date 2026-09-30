@@ -7,16 +7,15 @@ train_runner.py 训练主程序模块。
 2. train.py 调用本文件的 train(scenario, ddl, max_episodes)。
 3. train() 先调用 train_config.build_train_config() 生成完整配置。
 4. train() 使用 train_utils.py 中的工具函数完成种子设置、环境尺度同步、动作应用和指标计算。
-5. train() 在每个 episode 结束时调用 train_eval.evaluate_hrl_three_layer_multi_seed() 进行评估。
+5. train() 在每个 episode 结束时调用 two-level evaluator 进行评估。
 6. safe 模式按模糊 DDL 可行性优先键保存 best checkpoint；旧模式仍按评估
    能耗保存，并在训练结束时保存 final checkpoint。
 
 文件职责：
-- 创建训练环境 CloudWorkflowEnv_VMAgents。
-- 推断 HostAgent、VMAgent、ManagerAgent 的状态维度和动作维度。
-- 创建三层 D3QNAgent。
-- 执行三层 HRL 训练循环：
-  Manager 选择 phase 级动作，HostAgent 选择 host，VMAgent 选择 VM 槽位。
+- 创建 Manager/Global Safe-VM Worker 两层训练环境。
+- 推断 Manager 与 Global Safe-VM Worker 的状态维度和动作维度。
+- 创建两层 D3QNAgent。
+- 执行两层 HRL 训练循环：Manager 排序任务，Worker 直接选择全局 VM。
 - 写入 phase 和 episode 两类训练日志。
 - 保存 best / step / final 模型。
 
@@ -34,10 +33,11 @@ import torch
 
 from base.d3qn_agent import D3QNAgent
 from base.heuristic_admission import file_sha256
-from base.hrl_env import CloudWorkflowEnv_VMAgents
+from base.hrl_env import GlobalSafeVMEnv
 from base.offline_pretraining import (
     pretrain_agents_from_demonstrations,
 )
+from base.safe_demonstration import demonstration_safety_config
 from base.safety_lagrange import (
     LagrangeSafetyController,
     synchronize_lagrange_multiplier,
@@ -48,7 +48,8 @@ from hrl_mix.model_selection import (
     build_config_snapshot,
     build_heuristic_library_version,
     build_replay_metadata,
-    is_better_model,
+    is_better_fallback_model,
+    is_better_feasible_model,
     save_best_checkpoint_bundle,
 )
 from hrl_mix.safe_metrics import (
@@ -62,7 +63,7 @@ from hrl_mix.train_config import (
 )
 from hrl_mix.train_eval import (
     aggregate_seed_results,
-    evaluate_hrl_three_layer_multi_seed,
+    evaluate_hrl_two_level_multi_seed,
 )
 from hrl_mix.validation_parallel import (
     ValidationEvaluationPool,
@@ -230,7 +231,7 @@ def _skipped_validation_result(skipped_energy, *, return_safety_metrics):
     一处分叉都会在某些开关组合下抛 ``too many values to unpack``。
     """
     skipped_energy = float(skipped_energy)
-    base = (0.0, 0.0, 0.0, skipped_energy)
+    base = (0.0, 0.0, skipped_energy)
     if not return_safety_metrics:
         return base
     return (
@@ -293,6 +294,8 @@ def _update_shared_lagrange_at_episode_end(
     controller,
     env,
     agents,
+    *,
+    cost_budget=None,
 ):
     """用 episode 实际工作流 DDL 违反率更新共享 lambda。"""
     violation_count = int(
@@ -309,6 +312,8 @@ def _update_shared_lagrange_at_episode_end(
             0,
         )
     )
+    if cost_budget is not None:
+        controller.set_cost_budget(cost_budget)
     diagnostics = controller.observe_episode(
         episode_violation_rate=(
             violation_count / max(completed_count, 1)
@@ -439,7 +444,6 @@ def _evaluate_training_scenarios(
     cfg,
     controller,
     vm_agent,
-    host_agent,
     manager_agent,
     seeds,
     return_safety_metrics,
@@ -451,11 +455,10 @@ def _evaluate_training_scenarios(
     if not scenarios:
         raise ValueError('validation scenarios must be non-empty')
     if len(scenarios) == 1:
-        return evaluate_hrl_three_layer_multi_seed(
+        return evaluate_hrl_two_level_multi_seed(
             env_cls,
             dict(active_env_kwargs),
             vm_agent,
-            host_agent,
             manager_agent,
             seeds=seeds,
             return_safety_metrics=return_safety_metrics,
@@ -486,11 +489,10 @@ def _evaluate_training_scenarios(
         results = [
             (
                 scenario,
-                evaluate_hrl_three_layer_multi_seed(
+                evaluate_hrl_two_level_multi_seed(
                     env_cls,
                     kwargs,
                     vm_agent,
-                    host_agent,
                     manager_agent,
                     seeds=seeds,
                     return_safety_metrics=return_safety_metrics,
@@ -525,20 +527,20 @@ def _evaluate_training_scenarios(
 
     means = tuple(
         float(np.mean([result[index] for _, result in results]))
-        for index in range(4)
+        for index in range(3)
     )
     if not return_safety_metrics:
         return means
 
     records = []
     for scenario, result in results:
-        for record in result[4]['per_seed_metrics']:
+        for record in result[3]['per_seed_metrics']:
             row = dict(record)
             row['scenario_id'] = scenario
             records.append(row)
     safety = aggregate_safe_metric_records(records)
     violation_budget = float(
-        results[0][1][4].get('evaluation_violation_budget', 0.0)
+        results[0][1][3].get('evaluation_violation_budget', 0.0)
     )
     safety.update({
         'evaluation_violation_budget': violation_budget,
@@ -551,33 +553,18 @@ def _evaluate_training_scenarios(
 
 
 def _probe_environment_dimensions(env, cfg):
-    """Probe all three layers, then restore a clean episode."""
-    st_host, ok = env.get_host_state_for_next_assignment()
+    """Probe Manager + Global Worker, then restore a clean episode."""
+    st_worker, ok = env.get_global_vm_state_for_current_task()
     while (not ok) and (not env.done_flag):
         _r_manager, _ = env.finish_phase_and_advance()
-        st_host, ok = env.get_host_state_for_next_assignment()
+        st_worker, ok = env.get_global_vm_state_for_current_task()
     if not ok:
         raise RuntimeError(
             "environment dimension probe found no schedulable task"
         )
-    host_state_dim = int(st_host["obs"].shape[0])
-    host_act_dim = int(st_host["mask"].shape[0])
-    a_host0 = (
-        int(np.argmax(st_host["mask"]))
-        if np.sum(st_host["mask"]) > 0
-        else 0
-    )
-    env.host_select(a_host0)
-    st_vm, ok_vm = env.get_vm_state_for_current_task()
-    if not ok_vm:
-        raise RuntimeError(
-            "environment dimension probe found no VM state"
-        )
     dimensions = {
-        "host_state_dim": host_state_dim,
-        "host_action_dim": host_act_dim,
-        "vm_state_dim": int(st_vm["obs"].shape[0]),
-        "vm_action_dim": int(st_vm["mask"].shape[0]),
+        "worker_state_dim": int(st_worker["obs"].shape[0]),
+        "worker_action_dim": int(st_worker["mask"].shape[0]),
         "manager_state_dim": int(
             env.get_manager_state().shape[0]
         ),
@@ -668,8 +655,13 @@ def train(
     protocol: str | None = None,
     source_scenario: str | None = None,
     resource_scale: str | None = None,
-    validation_workers: int = 3,
+    validation_workers: int = 5,
     safe_rl_lambda_lr: float = 0.05,
+    safe_rl_predicted_violation_weight: float = 1.0,
+    safe_rl_actual_violation_weight: float = 1.0,
+    safe_rl_lateness_weight: float = 1.0,
+    safe_rl_positive_delta_risk_weight: float = 0.1,
+    safe_rl_cost_budget_schedule=((0.25, 0.02), (350.0 / 600.0, 0.01), (1.0, 0.005)),
 ):
     """执行一次完整训练
 
@@ -693,6 +685,17 @@ def train(
             safe_rl_dynamic_lambda_enabled
         ),
         safe_rl_lambda_lr=safe_rl_lambda_lr,
+        safe_rl_predicted_violation_weight=(
+            safe_rl_predicted_violation_weight
+        ),
+        safe_rl_actual_violation_weight=(
+            safe_rl_actual_violation_weight
+        ),
+        safe_rl_lateness_weight=safe_rl_lateness_weight,
+        safe_rl_positive_delta_risk_weight=(
+            safe_rl_positive_delta_risk_weight
+        ),
+        safe_rl_cost_budget_schedule=safe_rl_cost_budget_schedule,
         safe_rl_heuristic_manager_enabled=(
             safe_rl_heuristic_manager_enabled
         ),
@@ -812,7 +815,7 @@ def train(
 
     # 构造环境入参。部分 reward 尺度参数不是构造函数参数，
     # 会在环境创建和 reset 之后通过 apply_env_scales() 手动写入
-    EnvCls = CloudWorkflowEnv_VMAgents # 这里只是给环境类起一个局部别名
+    EnvCls = GlobalSafeVMEnv
     env_kwargs = dict(
         dax_paths=cfg.dax_list,
         horizon=cfg.horizon,
@@ -854,6 +857,9 @@ def train(
         safe_rl_lateness_clip=cfg.safe_rl.lateness_clip,
         safe_rl_delta_risk_weight=(
             cfg.safe_rl.delta_risk_weight
+        ),
+        safe_rl_predicted_violation_weight=(
+            cfg.safe_rl.predicted_violation_weight
         ),
         safe_rl_violation_weight=(
             cfg.safe_rl.violation_weight
@@ -917,18 +923,18 @@ def train(
     # 评估环境也需要复用这些尺度参数，因此把它们补充进 env_kwargs，保证后续评估环境与训练环境使用相同尺度
     _sync_env_kwargs_scales(env_kwargs, env)
 
-    # 探测三层 observation/action 维度。课程切换后的新环境会与该基线比较，
-    # 不允许在同一 checkpoint 中静默改变 Host/VM 动作维度。
+    # 探测 Manager + Global Worker 维度；同资源规模泛化必须保持一致。
     environment_dimensions = _probe_environment_dimensions(
         env,
         cfg,
     )
-    host_state_dim = environment_dimensions["host_state_dim"]
-    host_act_dim = environment_dimensions["host_action_dim"]
-    vm_state_dim = environment_dimensions["vm_state_dim"]
-    vm_act_dim = environment_dimensions["vm_action_dim"]
+    vm_state_dim = environment_dimensions["worker_state_dim"]
+    vm_act_dim = environment_dimensions["worker_action_dim"]
 
-    print(f"[env] host_obs_dim={host_state_dim} host_act_dim={host_act_dim} | vm_obs_dim={vm_state_dim} vm_act_dim={vm_act_dim}")
+    print(
+        f"[env] global_worker_obs_dim={vm_state_dim} "
+        f"global_worker_action_dim={vm_act_dim}"
+    )
     manager_act_dim = environment_dimensions[
         "manager_action_dim"
     ]
@@ -951,7 +957,11 @@ def train(
         f"[safe rl stage1] enabled={cfg.safe_rl.enabled} "
         f"lambda_E={cfg.safe_rl.fuzzy_energy_uncertainty_weight:.2f} "
         f"eta={cfg.safe_rl.fuzzy_deadline_eta:.2f} "
-        f"process_risk_aggregation={cfg.safe_rl.process_risk_aggregation}"
+        f"process_risk_aggregation={cfg.safe_rl.process_risk_aggregation} "
+        f"qc_weights=(predicted={cfg.safe_rl.predicted_violation_weight:.3f},"
+        f"actual={cfg.safe_rl.violation_weight:.3f},"
+        f"lateness={cfg.safe_rl.lateness_weight:.3f},"
+        f"delta_risk={cfg.safe_rl.delta_risk_weight:.3f})"
     )
     print(
         f"[safe rl shield stage4] enabled="
@@ -968,11 +978,12 @@ def train(
     )
     print(
         f"[safe rl lagrange stage8] enabled="
-        f"{lagrange_controller.enabled} sharing=global_three_layer "
+        f"{lagrange_controller.enabled} sharing=manager_global_worker "
         f"period=episode_violation_rate lr={lagrange_cfg.lambda_lr:.6g} "
         f"bounds=[{lagrange_cfg.lambda_min:.3f},"
         f"{lagrange_cfg.lambda_max:.3f}] "
         f"cost_budget={lagrange_cfg.cost_budget:.6g} "
+        f"schedule={lagrange_cfg.cost_budget_schedule} "
         f"interval={lagrange_cfg.update_interval}episodes "
         f"warmup={lagrange_cfg.warmup_steps}episodes"
     )
@@ -983,8 +994,8 @@ def train(
         f"{cfg.safe_rl.replay.near_boundary_margin:.6g}s "
         f"combined_per_priority="
         f"{cfg.safe_rl.replay.combined_per_priority} "
-        f"use_per=(host={cfg.safe_rl.replay.host_use_per},"
-        f"vm={cfg.safe_rl.replay.vm_use_per},manager=False) "
+        f"use_per=(worker={cfg.safe_rl.replay.worker_use_per},"
+        f"manager={cfg.safe_rl.replay.manager_use_per}) "
         f"td_weights=("
         f"{cfg.safe_rl.replay.performance_td_weight:.3f},"
         f"{cfg.safe_rl.replay.safety_td_weight:.3f})"
@@ -1018,78 +1029,30 @@ def train(
         if cfg.safe_rl.state.enabled
         else "legacy_observation"
     )
-    host_observation_schema_version = (
-        env.get_observation_schema("host")["schema_version"]
-        if cfg.safe_rl.state.enabled
-        else "legacy_observation"
-    )
-    vm_observation_schema_version = (
-        env.get_observation_schema("vm")["schema_version"]
-        if cfg.safe_rl.state.enabled
-        else "legacy_observation"
-    )
+    vm_observation_schema_version = env.get_observation_schema(
+        "worker"
+    )["schema_version"]
 
-    # VM 层智能体：在 HostAgent 已选定 host 后，为当前任务选择具体 VM 槽位。
+    # Global Worker 直接在所有 VM 上动作；Host 仅存在于 observation 中。
     vm_agent = D3QNAgent(
         input_dim=vm_state_dim,
         output_dim=vm_act_dim,
-        lr=cfg.vm_agent.lr,
-        gamma=cfg.vm_agent.gamma,
-        batch_size=cfg.vm_agent.batch_size,
-        buffer_size=cfg.vm_agent.buffer_size,
-        eps_start=cfg.vm_agent.eps_start,
-        eps_end=cfg.vm_agent.eps_end,
-        eps_decay_steps=cfg.vm_agent.eps_decay_steps,
-        target_update_tau=cfg.vm_agent.target_update_tau,
-        grad_clip=cfg.vm_agent.grad_clip,
-        hidden_dims=cfg.vm_agent.hidden_dims,
+        lr=cfg.worker_agent.lr,
+        gamma=cfg.worker_agent.gamma,
+        batch_size=cfg.worker_agent.batch_size,
+        buffer_size=cfg.worker_agent.buffer_size,
+        eps_start=cfg.worker_agent.eps_start,
+        eps_end=cfg.worker_agent.eps_end,
+        eps_decay_steps=cfg.worker_agent.eps_decay_steps,
+        target_update_tau=cfg.worker_agent.target_update_tau,
+        grad_clip=cfg.worker_agent.grad_clip,
+        hidden_dims=cfg.worker_agent.hidden_dims,
         device=device,
         use_per=bool(
             cfg.safe_rl.enabled
-            and cfg.safe_rl.replay.vm_use_per
+            and cfg.safe_rl.replay.worker_use_per
         ),
         observation_schema_version=vm_observation_schema_version,
-        safe_rl_enabled=cfg.safe_rl.enabled,
-        safety_discount=cfg.safe_rl.safety_discount,
-        safety_learning_rate=cfg.safe_rl.safety_learning_rate,
-        safety_loss_weight=cfg.safe_rl.safety_loss_weight,
-        initial_lagrange_multiplier=(
-            initial_agent_lambda
-        ),
-        safe_replay_near_boundary_margin=(
-            cfg.safe_rl.replay.near_boundary_margin
-        ),
-        safe_per_combined_priority=(
-            cfg.safe_rl.replay.combined_per_priority
-        ),
-        safe_per_performance_td_weight=(
-            cfg.safe_rl.replay.performance_td_weight
-        ),
-        safe_per_safety_td_weight=(
-            cfg.safe_rl.replay.safety_td_weight
-        ),
-    )
-
-    # Host 层智能体：为当前待调度任务选择 host。
-    host_agent = D3QNAgent(
-        input_dim=host_state_dim,
-        output_dim=host_act_dim,
-        lr=cfg.host_agent.lr,
-        gamma=cfg.host_agent.gamma,
-        batch_size=cfg.host_agent.batch_size,
-        buffer_size=cfg.host_agent.buffer_size,
-        eps_start=cfg.host_agent.eps_start,
-        eps_end=cfg.host_agent.eps_end,
-        eps_decay_steps=cfg.host_agent.eps_decay_steps,
-        target_update_tau=cfg.host_agent.target_update_tau,
-        grad_clip=cfg.host_agent.grad_clip,
-        hidden_dims=cfg.host_agent.hidden_dims,
-        device=device,
-        use_per=bool(
-            cfg.safe_rl.enabled
-            and cfg.safe_rl.replay.host_use_per
-        ),
-        observation_schema_version=host_observation_schema_version,
         safe_rl_enabled=cfg.safe_rl.enabled,
         safety_discount=cfg.safe_rl.safety_discount,
         safety_learning_rate=cfg.safe_rl.safety_learning_rate,
@@ -1155,11 +1118,10 @@ def train(
             cfg.safe_rl.replay.safety_td_weight
         ),
     )
-    safe_agents = (manager_agent, host_agent, vm_agent)
+    safe_agents = (manager_agent, vm_agent)
     agents_by_layer = {
         "manager": manager_agent,
-        "host": host_agent,
-        "vm": vm_agent,
+        "worker": vm_agent,
     }
     if lagrange_controller.enabled:
         synchronize_lagrange_multiplier(
@@ -1202,6 +1164,25 @@ def train(
         pretraining_report = pretrain_agents_from_demonstrations(
             agents_by_layer,
             cfg.safe_rl.offline_pretraining,
+            scenario_code=cfg.scenario,
+            source_scenario=cfg.source_scenario,
+            ddl_name=cfg.ddl_name,
+            ddl_setting={
+                "deadline_mode": str(env.deadline_mode),
+                "deadline_alpha_small": float(
+                    env.deadline_alpha_small
+                ),
+                "deadline_alpha_large": float(
+                    env.deadline_alpha_large
+                ),
+                "deadline_alpha_small_prob": float(
+                    env.deadline_alpha_small_prob
+                ),
+            },
+            resource_scale=cfg.resource_scale,
+            worker_action_dim=vm_act_dim,
+            num_vms=env.num_vms,
+            safety_config=demonstration_safety_config(env),
             **pretraining_identity,
         )
     else:
@@ -1248,21 +1229,39 @@ def train(
         "ep_length", "env_time",
         "episode_energy",
         "wf_completed", "wf_target",
-        "eps_vm", "eps_host", "eps_mgr",
+        "eps_worker", "eps_mgr",
         "assign_cnt", "phase_size_sum_mi",
-        "r_vm_phase_mean", "r_host_phase_mean",
+        "r_worker_phase_mean",
         "r_manager_raw",
         "phase_energy", "phase_delay",
         "phase_energy_cost", "phase_delay_cost",
         "manager_reward_old", "manager_reward_new",
         "ep_total_lateness", "ep_avg_lateness", "wf_avg_lateness",
         "ep_wf_lateness_sum",
-        "eval_vm", "eval_host", "eval_mgr", "eval_energy",
+        "eval_worker", "eval_mgr", "eval_energy",
     ]
     if cfg.safe_rl.enabled:
         # safe 模式使用独立输出目录，可以安全增加阶段 1 字段；关闭时保持旧
         # CSV 表头完全不变，避免向历史日志追加不同列数的行。
         safety_fields = [
+            "manager_heuristic_selection_frequency",
+            "worker_qr_mean",
+            "worker_qr_std",
+            "worker_qc_mean",
+            "worker_qc_std",
+            "lambda_qc_over_abs_qr",
+            "worker_td_r_raw",
+            "worker_td_c_raw",
+            "worker_td_r_normalized",
+            "worker_td_c_normalized",
+            "legal_vm_count",
+            "safe_vm_count",
+            "safe_action_ratio",
+            "shield_intervention_rate",
+            "fallback_rate",
+            "selected_vm_predicted_violation",
+            "selected_vm_safety_margin",
+            "selected_vm_marginal_fuzzy_energy",
             "performance_reward",
             "energy_reward",
             "completion_reward",
@@ -1271,6 +1270,7 @@ def train(
             "communication_reward",
             "total_performance_reward",
             "safety_cost",
+            "predicted_violation_cost",
             "positive_delta_risk",
             "normalized_lateness",
             "raw_fuzzy_lateness_seconds",
@@ -1304,8 +1304,7 @@ def train(
             "shield_record_count",
             "shield_intervention_count",
             "shield_fallback_count",
-            "host_action_modified_count",
-            "vm_action_modified_count",
+            "worker_action_modified_count",
         ]
         insert_at = logger_fields.index("ep_total_lateness")
         logger_fields[insert_at:insert_at] = shield_fields
@@ -1368,7 +1367,7 @@ def train(
         cfg.safe_rl.enabled
         and cfg.safe_rl.model_selection.enabled
     )
-    # 评估返回值是 4 元组还是 5 元组，必须只有这一处判据：请求安全指标的
+    # 评估返回值是 3 元组还是 4 元组，必须只有这一处判据：请求安全指标的
     # 条件、跳过验证时构造的占位元组、以及解包的分支三者一旦分叉，就会在
     # 某些开关组合下抛 "too many values to unpack"。这四个子条件在整个训练
     # 循环内都不变（都在循环之前一次性确定），所以在这里求一次即可。
@@ -1378,43 +1377,40 @@ def train(
         or training_controller is not None
         or metric_store is not None
     )
-    best_model_metrics = None
+    best_feasible_metrics = None
+    best_fallback_metrics = None
     if (
         feasibility_first_selection
         and training_resume_payload is not None
-        and training_resume_payload.get("best_model_metrics")
-        is not None
     ):
-        best_model_metrics = (
-            FeasibilityFirstModelMetrics.from_mapping(
-                training_resume_payload["best_model_metrics"]
+        if training_resume_payload.get("best_feasible_metrics") is not None:
+            best_feasible_metrics = FeasibilityFirstModelMetrics.from_mapping(
+                training_resume_payload["best_feasible_metrics"]
             )
-        )
+        if training_resume_payload.get("best_fallback_metrics") is not None:
+            best_fallback_metrics = FeasibilityFirstModelMetrics.from_mapping(
+                training_resume_payload["best_fallback_metrics"]
+            )
     # Legacy mode retains the historical energy-only checkpoint rule. Safe
     # mode uses the feasibility-first key and keeps this scalar as a
     # compatibility/reporting alias only.
     best_eval_energy = (
-        float(best_model_metrics.fuzzy_energy_score)
-        if best_model_metrics is not None
-        else (
-            float(
-                training_resume_payload[
-                    "best_validation_energy"
-                ]
-            )
-            if (
-                not feasibility_first_selection
-                and training_resume_payload is not None
-                and training_resume_payload.get(
-                    "best_validation_energy"
-                )
-                is not None
-            )
-            else float("inf")
+        float(
+            training_resume_payload[
+                "best_validation_energy"
+            ]
         )
+        if (
+            not feasibility_first_selection
+            and training_resume_payload is not None
+            and training_resume_payload.get(
+                "best_validation_energy"
+            )
+            is not None
+        )
+        else float("inf")
     )
-    best_ckpt_vm = os.path.join(cfg.save_dir, "best_vm.pth")
-    best_ckpt_host = os.path.join(cfg.save_dir, "best_host.pth")
+    best_ckpt_vm = os.path.join(cfg.save_dir, "best_worker.pth")
     best_ckpt_mgr = os.path.join(cfg.save_dir, "best_manager.pth")
 
     # 验证评估的进程级并行。worker 与父进程同设备：验证结果直接决定 best
@@ -1436,7 +1432,6 @@ def train(
         validation_pool = ValidationEvaluationPool(
             EnvCls,
             vm_agent,
-            host_agent,
             manager_agent,
             workers=resolved_validation_workers,
             device=str(device),
@@ -1501,6 +1496,7 @@ def train(
     ep_energy0 = float(env.total_energy)
     episode_started_at = time.perf_counter()
     episode_phase_metric_records = []
+    manager_heuristic_selection_counts = {}
 
     # 每个 episode 开始时，Manager 先选择一个 phase 动作并应用到环境
     sH = env.get_manager_state()
@@ -1512,10 +1508,9 @@ def train(
         safe_rl_enabled=cfg.safe_rl.enabled,
     )
     manager_apply_action(env, m_act)
-    pending_host_transition = None
     pending_vm_transition = None
 
-    print_device_info(vm_agent, host_agent, manager_agent)
+    print_device_info(vm_agent, manager_agent)
 
     while (episode_idx < cfg.max_episodes) and (global_step < cfg.hard_max_steps):
         # episode 结束后：执行评估、记录 episode 日志、保存 checkpoint，然后 reset 环境。
@@ -1529,6 +1524,12 @@ def train(
                         lagrange_controller,
                         env,
                         safe_agents,
+                        cost_budget=(
+                            lagrange_cfg.budget_for_progress(
+                                (episode_idx + 1)
+                                / max(cfg.max_episodes, 1)
+                            )
+                        ),
                     )
                 )
             else:
@@ -1599,7 +1600,6 @@ def train(
                         cfg=cfg,
                         controller=training_controller,
                         vm_agent=vm_agent,
-                        host_agent=host_agent,
                         manager_agent=manager_agent,
                         seeds=cfg.validation_seeds,
                         return_safety_metrics=True,
@@ -1614,7 +1614,6 @@ def train(
                     cfg=cfg,
                     controller=None,
                     vm_agent=vm_agent,
-                    host_agent=host_agent,
                     manager_agent=manager_agent,
                     seeds=cfg.validation_seeds,
                     scenarios=(str(cfg.source_scenario or cfg.training_scenarios[0]).upper(),),
@@ -1633,13 +1632,12 @@ def train(
             if validation_returns_safety_metrics:
                 (
                     eval_vm,
-                    eval_host,
                     eval_mgr,
                     eval_energy,
                     eval_safety,
                 ) = eval_result
             else:
-                eval_vm, eval_host, eval_mgr, eval_energy = (
+                eval_vm, eval_mgr, eval_energy = (
                     eval_result
                 )
                 eval_safety = {
@@ -1712,7 +1710,7 @@ def train(
                 and validation_due
                 and not training_controller.completed
             ):
-                curriculum_safety = curriculum_eval_result[4]
+                curriculum_safety = curriculum_eval_result[3]
                 pipeline_stage_metrics = StageMetrics(
                     fuzzy_energy_score=float(
                         curriculum_safety["fuzzy_energy_score"]
@@ -1765,13 +1763,11 @@ def train(
                 episode_energy=ep_energy,
                 wf_completed=getattr(env, "completed_workflows", 0),
                 wf_target=(getattr(env, "workflows_per_episode", None) or ""),
-                eps_vm=vm_agent.epsilon(),
-                eps_host=host_agent.epsilon(),
+                eps_worker=vm_agent.epsilon(),
                 eps_mgr=manager_agent.epsilon(),
                 assign_cnt="",
                 phase_size_sum_mi="",
-                r_vm_phase_mean="",
-                r_host_phase_mean="",
+                r_worker_phase_mean="",
                 r_manager_raw="",
                 phase_energy="",
                 phase_delay="",
@@ -1789,6 +1785,7 @@ def train(
                 safety_cost=float(
                     getattr(env, "_safety_cumulative_cost", 0.0)
                 ),
+                predicted_violation_cost="",
                 positive_delta_risk=float(
                     getattr(
                         env,
@@ -1899,14 +1896,15 @@ def train(
                 shield_fallback_count=int(
                     episode_shield["shield_fallback_count"]
                 ),
-                host_action_modified_count=int(
-                    episode_shield[
-                        "host_action_modified_count"
-                    ]
+                shield_intervention_rate=float(
+                    episode_shield["shield_intervention_rate"]
                 ),
-                vm_action_modified_count=int(
+                fallback_rate=float(
+                    episode_shield["fallback_rate"]
+                ),
+                worker_action_modified_count=int(
                     episode_shield[
-                        "vm_action_modified_count"
+                        "worker_action_modified_count"
                     ]
                 ),
                 current_lambda=float(
@@ -1968,14 +1966,14 @@ def train(
                 ep_avg_lateness=ep_avg_late,
                 wf_avg_lateness=wf_avg_late,
                 ep_wf_lateness_sum=ep_wf_late_sum,
-                eval_vm=eval_vm, eval_host=eval_host, eval_mgr=eval_mgr, eval_energy=eval_energy,
+                eval_worker=eval_vm, eval_mgr=eval_mgr, eval_energy=eval_energy,
             )
 
             print(
                 f"[episode={episode_idx}] len={episode_steps} energy={ep_energy:.3f}J | "
                 f"task_late_sum={ep_total_late:.3f}s task_late_avg={ep_avg_late:.6f}s | "
                 f"wf_late_sum={ep_wf_late_sum:.3f}s | "
-                f"eval_vm={eval_vm:.6f} eval_host={eval_host:.6f} eval_mgr={eval_mgr:.6f} eval_energy={eval_energy:.3f}J "
+                f"eval_worker={eval_vm:.6f} eval_mgr={eval_mgr:.6f} eval_energy={eval_energy:.3f}J "
                 f"(mean over validation seeds="
                 f"{training_plan.seed_split.validation if training_plan is not None else cfg.eval_seeds}) | "
                 f"wf={getattr(env,'completed_workflows',0)}/{getattr(env,'workflows_per_episode','unknown')} | "
@@ -1992,99 +1990,75 @@ def train(
                 f"worst_seed_late={eval_safety['worst_seed_lateness']:.6f}"
             )
 
-            best_improved = validation_due and (
-                is_better_model(
+            if feasibility_first_selection and validation_due:
+                if is_better_feasible_model(
                     candidate_model_metrics,
-                    best_model_metrics,
-                )
-                if feasibility_first_selection
-                else eval_energy < best_eval_energy
-            )
-            if best_improved:
-                if feasibility_first_selection:
-                    best_model_metrics = candidate_model_metrics
-                    best_eval_energy = float(
-                        candidate_model_metrics.fuzzy_energy_score
-                    )
-                    checkpoint_metadata = (
-                        _checkpoint_runtime_metadata(
+                    best_feasible_metrics,
+                ):
+                    best_feasible_metrics = candidate_model_metrics
+                    best_manifest = save_best_checkpoint_bundle(
+                        cfg.save_dir,
+                        agents=agents_by_layer,
+                        lagrange_controller=lagrange_controller,
+                        model_metrics=best_feasible_metrics,
+                        **_checkpoint_runtime_metadata(
                             cfg=cfg,
                             env=env,
                             agents=agents_by_layer,
-                            training_controller=(
-                                training_controller
-                            ),
-                        )
-                    )
-                    best_manifest = (
-                        save_best_checkpoint_bundle(
-                            cfg.save_dir,
-                            agents=agents_by_layer,
-                            lagrange_controller=(
-                                lagrange_controller
-                            ),
-                            model_metrics=best_model_metrics,
-                            **checkpoint_metadata,
-                        )
-                    )
-                    validation_requirement_met = bool(
-                        best_model_metrics.all_seed_feasible
-                        if (
-                            cfg.safe_rl.model_selection
-                            .require_all_validation_seeds_feasible
-                        )
-                        else (
-                            best_model_metrics
-                            .deadline_violation_rate
-                            == 0.0
-                        )
+                            training_controller=training_controller,
+                        ),
                     )
                     print(
-                        "[best feasibility-first] key="
-                        f"{best_model_metrics.comparison_key} "
-                        f"all_seed_required="
-                        f"{cfg.safe_rl.model_selection.require_all_validation_seeds_feasible} "
-                        f"requirement_met={validation_requirement_met} "
+                        "[best_feasible] energy="
+                        f"{best_feasible_metrics.fuzzy_energy_score:.6f} "
                         f"manifest={best_manifest}"
                     )
-                else:
-                    best_eval_energy = eval_energy
-                    _save_agent_checkpoint(
-                        vm_agent,
-                        best_ckpt_vm,
-                        lagrange_controller,
-                    )
-                    _save_agent_checkpoint(
-                        host_agent,
-                        best_ckpt_host,
-                        lagrange_controller,
-                    )
-                    _save_agent_checkpoint(
-                        manager_agent,
-                        best_ckpt_mgr,
-                        lagrange_controller,
+                if is_better_fallback_model(
+                    candidate_model_metrics,
+                    best_fallback_metrics,
+                ):
+                    best_fallback_metrics = candidate_model_metrics
+                    best_manifest = save_best_checkpoint_bundle(
+                        cfg.save_dir,
+                        agents=agents_by_layer,
+                        lagrange_controller=lagrange_controller,
+                        model_metrics=best_fallback_metrics,
+                        **_checkpoint_runtime_metadata(
+                            cfg=cfg,
+                            env=env,
+                            agents=agents_by_layer,
+                            training_controller=training_controller,
+                        ),
                     )
                     print(
-                        f"[best legacy] eval_energy="
-                        f"{best_eval_energy:.3f}J -> saved "
-                        f"{best_ckpt_vm} / {best_ckpt_host} / "
-                        f"{best_ckpt_mgr}"
+                        "[best_fallback] key="
+                        f"{best_fallback_metrics.fallback_key} "
+                        f"manifest={best_manifest}"
                     )
+            elif validation_due and eval_energy < best_eval_energy:
+                best_eval_energy = eval_energy
+                _save_agent_checkpoint(
+                    vm_agent,
+                    best_ckpt_vm,
+                    lagrange_controller,
+                )
+                _save_agent_checkpoint(
+                    manager_agent,
+                    best_ckpt_mgr,
+                    lagrange_controller,
+                )
+                print(
+                    f"[best legacy] eval_energy="
+                    f"{best_eval_energy:.3f}J -> saved "
+                    f"{best_ckpt_vm} / {best_ckpt_mgr}"
+                )
 
             if (global_step % cfg.save_interval) == 0:
                 _save_agent_checkpoint(
                     vm_agent,
                     os.path.join(
                         cfg.save_dir,
-                        f"vm_step{global_step}.pth",
-                    ),
-                    lagrange_controller,
-                )
-                _save_agent_checkpoint(
-                    host_agent,
-                    os.path.join(
-                        cfg.save_dir,
-                        f"host_step{global_step}.pth",
+                        f"worker_step{global_step}.pth",
                     ),
                     lagrange_controller,
                 )
@@ -2092,7 +2066,7 @@ def train(
                     manager_agent,
                     os.path.join(
                         cfg.save_dir,
-                        f"mgr_step{global_step}.pth",
+                        f"manager_step{global_step}.pth",
                     ),
                     lagrange_controller,
                 )
@@ -2140,9 +2114,14 @@ def train(
                             ),
                             global_step=global_step,
                             next_episode=episode_idx + 1,
-                            best_model_metrics=(
-                                best_model_metrics.to_dict()
-                                if best_model_metrics is not None
+                            best_feasible_metrics=(
+                                best_feasible_metrics.to_dict()
+                                if best_feasible_metrics is not None
+                                else None
+                            ),
+                            best_fallback_metrics=(
+                                best_fallback_metrics.to_dict()
+                                if best_fallback_metrics is not None
                                 else None
                             ),
                             replay_metadata=(
@@ -2223,7 +2202,6 @@ def train(
                     apply_env_scales(env, cfg)
                     _sync_env_kwargs_scales(next_env_kwargs, env)
                     env_kwargs = next_env_kwargs
-            pending_host_transition = None
             pending_vm_transition = None
 
             ep_energy0 = float(env.total_energy)
@@ -2245,12 +2223,20 @@ def train(
             manager_apply_action(env, m_act)
             continue
 
-        # 一个 phase 内可能包含多个任务分配。
-        # 对每个任务，先由 HostAgent 选 host，再由 VMAgent 选 VM 槽位。
-        phase_vm_rewards = []
-        phase_host_rewards = []
+        # 一个 phase 内可能包含多个任务分配；Global Worker 直接选择 VM。
+        phase_worker_rewards = []
+        phase_worker_costs = []
+        phase_worker_qr_values = []
+        phase_worker_qc_values = []
+        phase_legal_vm_counts = []
+        phase_safe_vm_counts = []
+        phase_safe_action_ratios = []
+        phase_selected_violations = []
+        phase_selected_margins = []
+        phase_selected_energies = []
         phase_safety = {
             "safety_cost": 0.0,
+            "predicted_violation_cost": 0.0,
             "positive_delta_risk": 0.0,
             "normalized_lateness": 0.0,
             "raw_fuzzy_lateness_seconds": 0.0,
@@ -2265,49 +2251,12 @@ def train(
         }
 
         while True:
-            st_host, has_next = env.get_host_state_for_next_assignment()
+            st_vm, has_next = env.get_global_vm_state_for_current_task()
             if not has_next:
                 break
-
-            if cfg.safe_rl.enabled and pending_host_transition is not None:
-                next_host_mask = layer_learning_action_mask(
-                    st_host,
-                    safe_rl_enabled=True,
-                )
-                _commit_safe_pending_transition(
-                    host_agent,
-                    pending_host_transition,
-                    next_state=st_host["obs"],
-                    next_mask=next_host_mask,
-                    done=0.0,
-                    warmup_frac=cfg.warmup_frac,
-                )
-                pending_host_transition = None
-
-            (
-                a_host,
-                host_action_selected_by_agent,
-                host_learning_mask,
-                host_selection,
-            ) = select_layer_action_with_info(
-                host_agent,
-                st_host,
-                safe_rl_enabled=cfg.safe_rl.enabled,
-                deterministic=False,
-                count_step=True,
-            )
-            env.host_select(
-                int(a_host),
-                action_selection=(
-                    host_selection
-                    if cfg.safe_rl.enabled
-                    else None
-                ),
-            )
-
-            st_vm, ok_vm = env.get_vm_state_for_current_task()
-            if not ok_vm:
-                break
+            phase_legal_vm_counts.append(int(st_vm["legal_vm_count"]))
+            phase_safe_vm_counts.append(int(st_vm["safe_vm_count"]))
+            phase_safe_action_ratios.append(float(st_vm["safe_action_ratio"]))
 
             if cfg.safe_rl.enabled and pending_vm_transition is not None:
                 next_vm_mask = layer_learning_action_mask(
@@ -2336,7 +2285,7 @@ def train(
                 deterministic=False,
                 count_step=True,
             )
-            r_host, r_vm, info_task = env.vm_assign(
+            r_vm, info_task = env.global_vm_assign(
                 int(a_vm),
                 action_selection=(
                     vm_selection
@@ -2344,17 +2293,34 @@ def train(
                     else None
                 ),
             )
-
             if cfg.safe_rl.enabled:
-                learning_r_host = float(
-                    info_task.get(
-                        "total_performance_reward",
-                        info_task.get(
-                            "performance_reward_host",
-                            r_host,
-                        ),
+                executed_worker_action = int(
+                    info_task.get("vm_shield_decision", {}).get(
+                        "executed_action", a_vm
                     )
                 )
+                with torch.inference_mode():
+                    worker_tensor = torch.as_tensor(
+                        st_vm["obs"],
+                        dtype=torch.float32,
+                        device=vm_agent.device,
+                    ).unsqueeze(0)
+                    phase_worker_qr_values.append(
+                        float(
+                            vm_agent.online(worker_tensor)[
+                                0, executed_worker_action
+                            ].item()
+                        )
+                    )
+                    phase_worker_qc_values.append(
+                        float(
+                            vm_agent.q_c_online(worker_tensor)[
+                                0, executed_worker_action
+                            ].item()
+                        )
+                    )
+
+            if cfg.safe_rl.enabled:
                 learning_r_vm = float(
                     info_task.get(
                         "total_performance_reward",
@@ -2364,21 +2330,29 @@ def train(
                         ),
                     )
                 )
-                learning_c_host = float(
-                    info_task.get("safety_cost", 0.0)
-                )
                 learning_c_vm = float(
                     info_task.get("safety_cost", 0.0)
                 )
             else:
-                learning_r_host = float(r_host)
                 learning_r_vm = float(r_vm)
 
-            phase_host_rewards.append(learning_r_host)
-            phase_vm_rewards.append(learning_r_vm)
+            phase_worker_rewards.append(learning_r_vm)
+            phase_worker_costs.append(
+                float(info_task.get("safety_cost", 0.0))
+            )
+            phase_selected_violations.append(
+                float(info_task.get("selected_vm_predicted_violation", 0.0))
+            )
+            phase_selected_margins.append(
+                float(info_task.get("selected_vm_safety_margin", 0.0))
+            )
+            phase_selected_energies.append(
+                float(info_task.get("selected_vm_marginal_fuzzy_energy", 0.0))
+            )
             if cfg.safe_rl.enabled:
                 for key in (
                     "safety_cost",
+                    "predicted_violation_cost",
                     "positive_delta_risk",
                     "normalized_lateness",
                     "raw_fuzzy_lateness_seconds",
@@ -2410,26 +2384,10 @@ def train(
                         margin,
                     )
 
-            # replay 第 3 字段严格使用环境实际执行动作；proposed action
-            # 与探索类型只追加为审计字段。安全模式延迟到下一次同层决策再写入，
-            # 使 Host/VM 的 Q_r/Q_c 能学习长期 bootstrap；旧模式保持历史
-            # 单步终止 transition。
-            host_action_audit = finalize_action_audit(
-                host_selection,
-                info_task.get("host_shield_decision", {}),
-            )
+            # replay action 始终是 shield 最终执行的 global_vm_index。
             vm_action_audit = finalize_action_audit(
                 vm_selection,
                 info_task.get("vm_shield_decision", {}),
-            )
-            host_replay_metadata = safe_replay_metadata(
-                st_host,
-                host_action_audit,
-                info_task,
-                shield_decision=info_task.get(
-                    "host_shield_decision",
-                    {},
-                ),
             )
             vm_replay_metadata = safe_replay_metadata(
                 st_vm,
@@ -2440,20 +2398,11 @@ def train(
                     {},
                 ),
             )
-            task_reward_components_host = (
-                performance_reward_components(
-                    info_task,
-                    total_performance_reward=learning_r_host,
-                )
-            )
             task_reward_components_vm = (
                 performance_reward_components(
                     info_task,
                     total_performance_reward=learning_r_vm,
                 )
-            )
-            host_replay_action = int(
-                host_action_audit["executed_action"]
             )
             vm_replay_action = int(
                 vm_action_audit["executed_action"]
@@ -2462,37 +2411,6 @@ def train(
                 # Stage 10 起 fallback 也作为明确分类的控制器经验保存；
                 # executed action 必须 hard-legal，但在空 final mask 时不伪装
                 # 成 RL 提议。Q_r/Q_c 仍统一使用 executed action。
-                pending_host_transition = {
-                    "state": np.array(
-                        st_host["obs"],
-                        copy=True,
-                    ),
-                    "mask": np.array(
-                        host_learning_mask,
-                        copy=True,
-                    ),
-                    "action": host_replay_action,
-                    "reward": learning_r_host,
-                    "cost": learning_c_host,
-                    "proposed_action": host_action_audit[
-                        "proposed_action"
-                    ],
-                    "action_source": host_action_audit[
-                        "action_source"
-                    ],
-                    "policy_selection_type": (
-                        host_action_audit[
-                            "policy_selection_type"
-                        ]
-                    ),
-                    "action_modified": host_action_audit[
-                        "action_modified"
-                    ],
-                    "performance_reward_components": (
-                        task_reward_components_host
-                    ),
-                    **host_replay_metadata,
-                }
                 pending_vm_transition = {
                     "state": np.array(
                         st_vm["obs"],
@@ -2525,20 +2443,6 @@ def train(
                     **vm_replay_metadata,
                 }
             else:
-                z_host_s = np.zeros_like(st_host["obs"])
-                z_host_m = np.zeros_like(st_host["mask"])
-                host_agent.remember(
-                    st_host["obs"],
-                    st_host["mask"],
-                    host_replay_action,
-                    learning_r_host,
-                    z_host_s,
-                    z_host_m,
-                    1.0,
-                )
-                if warmup_ready(host_agent, cfg.warmup_frac):
-                    host_agent.update()
-
                 z_vm_s = np.zeros_like(st_vm["obs"])
                 z_vm_m = np.zeros_like(st_vm["mask"])
                 vm_agent.remember(
@@ -2592,20 +2496,6 @@ def train(
         phase_size_sum_mi = float(pinfo.get("phase_size_sum_mi", 0.0))
 
         if cfg.safe_rl.enabled and env.done_flag:
-            if pending_host_transition is not None:
-                _commit_safe_pending_transition(
-                    host_agent,
-                    pending_host_transition,
-                    next_state=np.zeros_like(
-                        pending_host_transition["state"]
-                    ),
-                    next_mask=np.zeros_like(
-                        pending_host_transition["mask"]
-                    ),
-                    done=1.0,
-                    warmup_frac=cfg.warmup_frac,
-                )
-                pending_host_transition = None
             if pending_vm_transition is not None:
                 _commit_safe_pending_transition(
                     vm_agent,
@@ -2621,8 +2511,33 @@ def train(
                 )
                 pending_vm_transition = None
 
-        r_vm_phase_mean = float(np.mean(phase_vm_rewards)) if len(phase_vm_rewards) > 0 else 0.0
-        r_host_phase_mean = float(np.mean(phase_host_rewards)) if len(phase_host_rewards) > 0 else 0.0
+        r_worker_phase_mean = (
+            float(np.mean(phase_worker_rewards))
+            if phase_worker_rewards
+            else 0.0
+        )
+        selected_heuristic_id = str(
+            pinfo.get("selected_heuristic_id", "")
+        )
+        if selected_heuristic_id:
+            manager_heuristic_selection_counts[selected_heuristic_id] = (
+                manager_heuristic_selection_counts.get(
+                    selected_heuristic_id, 0
+                )
+                + 1
+            )
+        worker_update = dict(vm_agent.last_update_info or {})
+        worker_qr_mean = float(
+            np.mean(phase_worker_qr_values)
+            if phase_worker_qr_values
+            else 0.0
+        )
+        worker_qc_mean = float(
+            np.mean(phase_worker_qc_values)
+            if phase_worker_qc_values
+            else 0.0
+        )
+        worker_qr_abs = abs(worker_qr_mean)
 
         # 记录 phase 级日志；episode 级字段留空。
         logger.log(
@@ -2630,14 +2545,81 @@ def train(
             ep_length="", env_time=pinfo.get("current_time", 0.0),
             episode_energy="",
             wf_completed="", wf_target="",
-            eps_vm=vm_agent.epsilon(),
-            eps_host=host_agent.epsilon(),
+            eps_worker=vm_agent.epsilon(),
             eps_mgr=manager_agent.epsilon(),
             assign_cnt=assign_cnt,
             phase_size_sum_mi=phase_size_sum_mi,
-            r_vm_phase_mean=r_vm_phase_mean,
-            r_host_phase_mean=r_host_phase_mean,
+            r_worker_phase_mean=r_worker_phase_mean,
             r_manager_raw=float(r_manager_raw),
+            manager_heuristic_selection_frequency=json.dumps(
+                {
+                    key: float(
+                        count
+                        / max(
+                            sum(
+                                manager_heuristic_selection_counts.values()
+                            ),
+                            1,
+                        )
+                    )
+                    for key, count in sorted(
+                        manager_heuristic_selection_counts.items()
+                    )
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            ),
+            worker_qr_mean=worker_qr_mean,
+            worker_qr_std=float(
+                np.std(phase_worker_qr_values)
+                if phase_worker_qr_values else 0.0
+            ),
+            worker_qc_mean=worker_qc_mean,
+            worker_qc_std=float(
+                np.std(phase_worker_qc_values)
+                if phase_worker_qc_values else 0.0
+            ),
+            lambda_qc_over_abs_qr=float(
+                lagrange_controller.current_lambda
+                * worker_qc_mean
+                / (worker_qr_abs + 1e-9)
+            ),
+            worker_td_r_raw=worker_update.get(
+                "performance_td_error_abs_mean_raw", ""
+            ),
+            worker_td_c_raw=worker_update.get(
+                "safety_td_error_abs_mean_raw", ""
+            ),
+            worker_td_r_normalized=worker_update.get(
+                "performance_td_error_abs_mean_normalized", ""
+            ),
+            worker_td_c_normalized=worker_update.get(
+                "safety_td_error_abs_mean_normalized", ""
+            ),
+            legal_vm_count=float(
+                np.mean(phase_legal_vm_counts)
+                if phase_legal_vm_counts else 0.0
+            ),
+            safe_vm_count=float(
+                np.mean(phase_safe_vm_counts)
+                if phase_safe_vm_counts else 0.0
+            ),
+            safe_action_ratio=float(
+                np.mean(phase_safe_action_ratios)
+                if phase_safe_action_ratios else 0.0
+            ),
+            selected_vm_predicted_violation=float(
+                np.mean(phase_selected_violations)
+                if phase_selected_violations else 0.0
+            ),
+            selected_vm_safety_margin=float(
+                np.mean(phase_selected_margins)
+                if phase_selected_margins else 0.0
+            ),
+            selected_vm_marginal_fuzzy_energy=float(
+                np.mean(phase_selected_energies)
+                if phase_selected_energies else 0.0
+            ),
             phase_energy=float(pinfo.get("phase_energy", 0.0)),
             phase_delay=float(pinfo.get("phase_delay", 0.0)),
             phase_energy_cost=float(pinfo.get("phase_energy_cost", 0.0)),
@@ -2669,6 +2651,9 @@ def train(
                 )
             ),
             safety_cost=float(phase_safety["safety_cost"]),
+            predicted_violation_cost=float(
+                phase_safety["predicted_violation_cost"]
+            ),
             positive_delta_risk=float(
                 phase_safety["positive_delta_risk"]
             ),
@@ -2768,11 +2753,14 @@ def train(
             shield_fallback_count=int(
                 pinfo.get("shield_fallback_count", 0)
             ),
-            host_action_modified_count=int(
-                pinfo.get("host_action_modified_count", 0)
+            shield_intervention_rate=float(
+                pinfo.get("shield_intervention_rate", 0.0)
             ),
-            vm_action_modified_count=int(
-                pinfo.get("vm_action_modified_count", 0)
+            fallback_rate=float(
+                pinfo.get("fallback_rate", 0.0)
+            ),
+            worker_action_modified_count=int(
+                pinfo.get("worker_action_modified_count", 0)
             ),
             current_lambda=float(
                 lagrange_controller.current_lambda
@@ -2807,7 +2795,7 @@ def train(
             ep_avg_lateness="",
             wf_avg_lateness="",
             ep_wf_lateness_sum="",
-            eval_vm="", eval_host="", eval_mgr="", eval_energy="",
+            eval_worker="", eval_mgr="", eval_energy="",
         )
 
         sH_next = env.get_manager_state()
@@ -2919,21 +2907,8 @@ def train(
             manager_apply_action(env, m_act)
 
     # hard_max_steps 截断时把尚未获得同层下一状态的安全样本作为截断终止
-    # transition 写入，避免静默丢失最后一次 Host/VM 决策。
+    # transition 写入，避免静默丢失最后一次 Worker 决策。
     if cfg.safe_rl.enabled:
-        if pending_host_transition is not None:
-            _commit_safe_pending_transition(
-                host_agent,
-                pending_host_transition,
-                next_state=np.zeros_like(
-                    pending_host_transition["state"]
-                ),
-                next_mask=np.zeros_like(
-                    pending_host_transition["mask"]
-                ),
-                done=1.0,
-                warmup_frac=cfg.warmup_frac,
-            )
         if pending_vm_transition is not None:
             _commit_safe_pending_transition(
                 vm_agent,
@@ -2949,17 +2924,11 @@ def train(
             )
 
     # 训练达到 episode 上限或 step 上限后，保存最终模型。
-    vm_final = os.path.join(cfg.save_dir, "vm_final.pth")
-    host_final = os.path.join(cfg.save_dir, "host_final.pth")
+    vm_final = os.path.join(cfg.save_dir, "worker_final.pth")
     mgr_final = os.path.join(cfg.save_dir, "manager_final.pth")
     _save_agent_checkpoint(
         vm_agent,
         vm_final,
-        lagrange_controller,
-    )
-    _save_agent_checkpoint(
-        host_agent,
-        host_final,
         lagrange_controller,
     )
     _save_agent_checkpoint(
@@ -2986,9 +2955,14 @@ def train(
             next_episode=(
                 training_controller.total_episode_count
             ),
-            best_model_metrics=(
-                best_model_metrics.to_dict()
-                if best_model_metrics is not None
+            best_feasible_metrics=(
+                best_feasible_metrics.to_dict()
+                if best_feasible_metrics is not None
+                else None
+            ),
+            best_fallback_metrics=(
+                best_fallback_metrics.to_dict()
+                if best_fallback_metrics is not None
                 else None
             ),
             replay_metadata=final_checkpoint_metadata[
@@ -3009,10 +2983,9 @@ def train(
         validation_pool.close()
     print(
         "Training finished.\n"
-        f"VM final model: {vm_final}\n"
-        f"Host final model: {host_final}\n"
+        f"Global Worker final model: {vm_final}\n"
         f"Manager final model: {mgr_final}\n"
-        f"Best eval models: {best_ckpt_vm} / {best_ckpt_host} / {best_ckpt_mgr}\n"
+        f"Best eval models: {best_ckpt_vm} / {best_ckpt_mgr}\n"
         f"Safe training pipeline checkpoint: "
         f"{final_pipeline_checkpoint or 'disabled'}\n"
         f"Log: {cfg.log_path}"

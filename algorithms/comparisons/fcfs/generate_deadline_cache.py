@@ -101,6 +101,7 @@ def generate_exact_deadline_cache(
     workers: int = 1,
     output_path: str | Path | None = None,
     policy_id: str = "fcfs_fcfs",
+    merge: bool = False,
 ) -> Path:
     """Run one deterministic FCFS policy and write an exact-mix cache."""
     policy_id = str(policy_id).strip().lower()
@@ -165,6 +166,29 @@ def generate_exact_deadline_cache(
         },
         "data": records,
     }
+    if merge and destination.is_file():
+        existing = json.loads(destination.read_text(encoding="utf-8"))
+        meta = existing.get("meta", {})
+        if "policy_id" not in meta and policy_id == "fcfs_fcfs":
+            meta["policy_id"] = "fcfs_fcfs"
+        for key, expected in (
+            ("schema_version", "exact_workload_mix_v1"),
+            ("policy_id", policy_id),
+            ("scenario", scenario_id),
+            ("workflows_per_episode", int(workflows_per_episode)),
+        ):
+            if meta.get(key) != expected:
+                raise ValueError(
+                    f"cannot merge deadline cache with mismatched {key}"
+                )
+        by_seed = {
+            int(record["seed"]): record
+            for record in existing.get("data", [])
+        }
+        by_seed.update({int(record["seed"]): record for record in records})
+        payload = existing
+        payload["data"] = [by_seed[seed] for seed in sorted(by_seed)]
+        payload["meta"]["environment_seeds"] = sorted(by_seed)
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.with_suffix(destination.suffix + ".tmp")
     temporary.write_text(
@@ -182,6 +206,8 @@ def main(argv=None) -> None:
     parser.add_argument("--config", default=str(DEFAULT_PROTOCOL_CONFIG))
     parser.add_argument("--workflows", type=int, default=50)
     parser.add_argument("--workers", type=int, default=1)
+    parser.add_argument("--seeds", nargs="+", type=int)
+    parser.add_argument("--merge", action="store_true")
     parser.add_argument("--output")
     parser.add_argument("--policy",default="fcfs_fcfs", choices=sorted(POLICY_TYPES),)
     args = parser.parse_args(argv)
@@ -191,8 +217,10 @@ def main(argv=None) -> None:
         config_path=args.config,
         workflows_per_episode=args.workflows,
         workers=args.workers,
+        seeds=(args.seeds or FORMAL_ENVIRONMENT_SEEDS),
         output_path=args.output,
         policy_id=args.policy,
+        merge=args.merge,
     ))
 
 

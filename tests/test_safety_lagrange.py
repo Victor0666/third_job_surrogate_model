@@ -21,7 +21,7 @@ try:
     from base.d3qn_agent import D3QNAgent
     from hrl_mix.train_eval import (
         FINAL_EVALUATION_VIOLATION_BUDGET,
-        evaluate_hrl_three_layer_multi_seed,
+        evaluate_hrl_two_level_multi_seed,
     )
     from hrl_mix.train_runner import (
         _save_agent_checkpoint,
@@ -159,7 +159,9 @@ class LagrangeSafetyControllerTests(unittest.TestCase):
         self.assertEqual(lagrange.lambda_lr, 0.05)
         self.assertEqual(lagrange.lambda_min, 0.0)
         self.assertEqual(lagrange.lambda_max, 100.0)
-        self.assertEqual(lagrange.cost_budget, 0.01)
+        self.assertEqual(lagrange.cost_budget, 0.02)
+        self.assertEqual(lagrange.budget_for_progress(0.25), 0.02)
+        self.assertEqual(lagrange.budget_for_progress(0.75), 0.005)
         self.assertEqual(lagrange.update_interval, 1)
         self.assertEqual(lagrange.cost_ema_factor, 0.9)
         self.assertEqual(lagrange.warmup_steps, 0)
@@ -243,7 +245,7 @@ class LagrangeCheckpointIntegrationTests(unittest.TestCase):
             initial_lagrange_multiplier=initial_lambda,
         )
 
-    def test_episode_end_updates_and_synchronizes_three_agents(self):
+    def test_episode_end_updates_and_synchronizes_manager_and_worker(self):
         class EpisodeEnvironment:
             _safety_cumulative_cost = 6.0
             _safety_cumulative_transition_count = 3
@@ -261,7 +263,7 @@ class LagrangeCheckpointIntegrationTests(unittest.TestCase):
             cost_ema_factor=0.0,
             warmup_steps=0,
         )
-        agents = [self._agent() for _ in range(3)]
+        agents = [self._agent() for _ in range(2)]
         result = _update_shared_lagrange_at_episode_end(
             controller,
             EpisodeEnvironment(),
@@ -271,7 +273,7 @@ class LagrangeCheckpointIntegrationTests(unittest.TestCase):
         self.assertAlmostEqual(result["current_lambda"], 1.125)
         self.assertEqual(
             [agent.lagrange_multiplier for agent in agents],
-            [1.125, 1.125, 1.125],
+            [1.125, 1.125],
         )
 
     def test_final_evaluation_uses_zero_violation_standard(self):
@@ -308,10 +310,9 @@ class LagrangeCheckpointIntegrationTests(unittest.TestCase):
                 self.assertFalse(count_step)
                 return 0
 
-        result = evaluate_hrl_three_layer_multi_seed(
+        result = evaluate_hrl_two_level_multi_seed(
             FinishedEvalEnvironment,
             {},
-            FixedAgent(),
             FixedAgent(),
             FixedAgent(),
             seeds=(1,),

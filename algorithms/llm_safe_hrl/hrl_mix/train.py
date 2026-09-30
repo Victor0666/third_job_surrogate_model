@@ -31,6 +31,21 @@ from hrl_mix.train_config import (
 )
 
 
+def _cost_budget_schedule(value):
+    try:
+        return tuple(
+            (float(progress), float(budget))
+            for progress, budget in (
+                item.split(":", 1) for item in value.split(",")
+            )
+        )
+    except (TypeError, ValueError) as exc:
+        raise argparse.ArgumentTypeError(
+            "expected PROGRESS:BUDGET pairs, e.g. "
+            "0.25:0.02,0.5833333333:0.01,1:0.005"
+        ) from exc
+
+
 def main(argv=None):
     """解析命令行参数，并把参数转交给训练主函数"""
     parser = argparse.ArgumentParser(description="Train the HRL Mix model for a scenario/deadline setting.")
@@ -88,7 +103,7 @@ def main(argv=None):
         help=(
             "Enable CMDP reward-cost output and stage-7 dual Q_r/Q_c "
             "value learning, stage-9 safe-action audit, and stage-10 "
-            "fuzzy-energy reward/versioned safe replay. Host/VM "
+            "fuzzy-energy reward/versioned safe replay. Global-VM "
             "fuzzy-DDL pruning requires --safe-rl-shield. Lambda "
             "remains fixed unless "
             "--safe-rl-dynamic-lambda is also enabled. Default is off, "
@@ -99,7 +114,7 @@ def main(argv=None):
         "--safe-rl-shield",
         action="store_true",
         help=(
-            "Enable the stage-4 fuzzy DDL Host/VM safety shield. "
+            "Enable the stage-4 fuzzy DDL Global-VM safety shield. "
             "Requires --safe-rl; default is off."
         ),
     )
@@ -107,7 +122,7 @@ def main(argv=None):
         "--safe-rl-state",
         action="store_true",
         help=(
-            "Enable the stage-6 Manager/Host/VM safety observation "
+            "Enable the stage-6 Manager/Global-Worker safety observation "
             "extension. Requires --safe-rl; default is off."
         ),
     )
@@ -124,6 +139,21 @@ def main(argv=None):
         type=float,
         default=0.05,
         help="Episode violation-rate Lagrange learning rate (default: 0.05).",
+    )
+    parser.add_argument(
+        "--safe-qc-predicted-violation-weight", type=float, default=1.0
+    )
+    parser.add_argument(
+        "--safe-qc-actual-violation-weight", type=float, default=1.0
+    )
+    parser.add_argument("--safe-qc-lateness-weight", type=float, default=1.0)
+    parser.add_argument(
+        "--safe-qc-positive-delta-risk-weight", type=float, default=0.1
+    )
+    parser.add_argument(
+        "--safe-cost-budget-schedule",
+        type=_cost_budget_schedule,
+        default=((0.25, 0.02), (350.0 / 600.0, 0.01), (1.0, 0.005)),
     )
     parser.add_argument(
         "--safe-rl-heuristic-manager",
@@ -263,10 +293,10 @@ def main(argv=None):
     parser.add_argument(
         "--validation-workers",
         type=int,
-        default=3,
+        default=5,
         help=(
-            "Worker processes for periodic validation episodes. 3 "
-            "is the default for the three fixed validation seeds; 1 keeps "
+            "Worker processes for periodic validation episodes. 5 "
+            "is the default for the five fixed validation seeds; 1 keeps "
             "the serial path unchanged; 0 auto-selects "
             "cpu_count-2. Workers run on the same device as the parent, "
             "so validation results and best-checkpoint selection are "
@@ -283,8 +313,6 @@ def main(argv=None):
             "--llm-run-manifest and --manager-heuristic-manifest are "
             "mutually exclusive"
         )
-    if args.episodes not in (None, 600):
-        parser.error("formal Safe-HRL training requires exactly 600 total episodes")
     source_scenario = args.source_scenario or args.scenario or "SS"
     deadline_cache_paths = parse_deadline_cache_overrides(
         args.deadline_cache,
@@ -306,6 +334,17 @@ def main(argv=None):
             args.safe_rl_dynamic_lambda
         ),
         safe_rl_lambda_lr=args.safe_rl_lambda_lr,
+        safe_rl_predicted_violation_weight=(
+            args.safe_qc_predicted_violation_weight
+        ),
+        safe_rl_actual_violation_weight=(
+            args.safe_qc_actual_violation_weight
+        ),
+        safe_rl_lateness_weight=args.safe_qc_lateness_weight,
+        safe_rl_positive_delta_risk_weight=(
+            args.safe_qc_positive_delta_risk_weight
+        ),
+        safe_rl_cost_budget_schedule=args.safe_cost_budget_schedule,
         safe_rl_heuristic_manager_enabled=(
             args.safe_rl_heuristic_manager
         ),

@@ -10,11 +10,30 @@ from algorithms.llm_safe_hrl.scenario_registry import (
 )
 from hrl_mix.protocol_evaluation import (
     DEFAULT_FINAL_TEST_SEEDS,
+    _append_seed_result,
     build_frozen_scenario_env_kwargs,
     evaluate_frozen_protocol_scenarios,
 )
 from hrl_mix import train as train_cli
 from hrl_mix import train_runner
+
+
+def test_seed_outputs_have_no_normal_host_rl_fields(tmp_path):
+    _append_seed_result(
+        tmp_path,
+        "SS",
+        201,
+        (1.0, 2.0, 3.0, {"deadline_violation_rate": 0.0}),
+    )
+    jsonl = (tmp_path / "scenario_SS_seed_results.jsonl").read_text(
+        encoding="utf-8"
+    )
+    csv_header = (tmp_path / "scenario_SS_seed_results.csv").read_text(
+        encoding="utf-8"
+    ).splitlines()[0]
+    assert "avg_worker_reward" in jsonl
+    assert "avg_host_reward" not in jsonl
+    assert "avg_host_reward" not in csv_header
 
 
 def _saved_config() -> dict:
@@ -88,8 +107,7 @@ def test_single_frozen_evaluation_visits_only_generalization_group(
     def evaluator(
         env_cls,
         env_kwargs,
-        vm_agent,
-        host_agent,
+        worker_agent,
         manager_agent,
         seeds,
         *,
@@ -105,7 +123,7 @@ def test_single_frozen_evaluation_visits_only_generalization_group(
             )
         )
         assert return_safety_metrics is True
-        return (0.0, 0.0, 0.0, 1.0, {"zero_violation_pass": True})
+        return (0.0, 0.0, 1.0, {"zero_violation_pass": True})
 
     result = evaluate_frozen_protocol_scenarios(
         context=context,
@@ -113,8 +131,7 @@ def test_single_frozen_evaluation_visits_only_generalization_group(
         library_path="library.json",
         agents={
             "manager": _FrozenAgent(),
-            "host": _FrozenAgent(),
-            "vm": _FrozenAgent(),
+            "worker": _FrozenAgent(),
         },
         evaluator=evaluator,
     )
@@ -146,7 +163,7 @@ def test_multi_frozen_evaluation_visits_all_training_scenarios():
 
     def evaluator(*args, **kwargs):
         seen.append(args[1]["scenario_code"])
-        return (0.0, 0.0, 0.0, 1.0, {})
+        return (0.0, 0.0, 1.0, {})
 
     evaluate_frozen_protocol_scenarios(
         context=context,
@@ -154,8 +171,7 @@ def test_multi_frozen_evaluation_visits_all_training_scenarios():
         library_path="library.json",
         agents={
             "manager": _FrozenAgent(),
-            "host": _FrozenAgent(),
-            "vm": _FrozenAgent(),
+            "worker": _FrozenAgent(),
         },
         evaluator=evaluator,
     )
@@ -247,8 +263,7 @@ def test_test_seed_overlap_is_rejected():
             library_path="library.json",
             agents={
                 "manager": _FrozenAgent(),
-                "host": _FrozenAgent(),
-                "vm": _FrozenAgent(),
+                "worker": _FrozenAgent(),
             },
             test_seeds=(1,),
             evaluator=lambda *args, **kwargs: None,
@@ -262,13 +277,12 @@ def test_agent_training_state_mutation_is_rejected():
     )
     agents = {
         "manager": _FrozenAgent(),
-        "host": _FrozenAgent(),
-        "vm": _FrozenAgent(),
+        "worker": _FrozenAgent(),
     }
 
     def mutating_evaluator(*args, **kwargs):
-        agents["vm"]._updates += 1
-        return (0.0, 0.0, 0.0, 1.0, {})
+        agents["worker"]._updates += 1
+        return (0.0, 0.0, 1.0, {})
 
     with pytest.raises(RuntimeError, match="modified agent state"):
         evaluate_frozen_protocol_scenarios(

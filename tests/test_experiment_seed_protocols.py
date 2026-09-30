@@ -96,7 +96,7 @@ def test_drlea_environment_seeds_do_not_depend_on_algorithm_seed():
     second = build_config("SS", "T", 99, smoke=True)
     expected = (
         (1, 2, 3, 4, 5),
-        (101, 102, 103),
+        (101, 102, 103, 104, 105),
         tuple(range(201, 231))
     )
     assert (
@@ -146,7 +146,7 @@ def test_formal_seed_contracts_cannot_be_overridden():
     assert context.llm_train_seeds == (1, 2, 3)
     assert context.llm_validation_seeds == (4, 5)
     assert context.safe_hrl_train_seeds == (1, 2, 3, 4, 5)
-    assert context.safe_hrl_validation_seeds == (101, 102, 103)
+    assert context.safe_hrl_validation_seeds == (101, 102, 103, 104, 105)
     assert context.final_test_seeds == tuple(range(201, 231))
     with pytest.raises(ValueError, match="formal LLM offline seeds"):
         resolve_experiment_protocol(
@@ -170,7 +170,7 @@ def test_formal_rl_lengths_validation_cadence_and_curriculum_ablation():
         assert config.max_episodes == 600
         assert config.validation_interval == 25
         assert config.train_seeds == (1, 2, 3, 4, 5)
-        assert config.validation_seeds == (101, 102, 103)
+        assert config.validation_seeds == (101, 102, 103, 104, 105)
         assert config.final_test_seeds == tuple(range(201, 231))
     assert formal.curriculum_enabled is False
     assert ablation.curriculum_enabled is True
