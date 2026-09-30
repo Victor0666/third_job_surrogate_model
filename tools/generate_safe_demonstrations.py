@@ -240,6 +240,8 @@ def main(argv=None):
                 workflow_seed=workflow_seed,
                 resource_seed=resource_seed,
                 split=selected,
+                source_scenario=cfg.source_scenario,
+                ddl_name=cfg.ddl_name,
             ),
             safety_standard=standard,
         )
