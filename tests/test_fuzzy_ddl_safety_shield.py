@@ -39,7 +39,32 @@ def _metrics(*values):
 class VMSafetyMaskTests(unittest.TestCase):
     """验证一个/多个安全 VM 以及硬合法性冲突。"""
 
-    def test_one_safe_vm_is_the_only_final_action(self):
+    def test_final_mask_ignores_predicted_safety(self):
+        shield = FuzzyDDLSafetyShield(enabled=True)
+        masks = shield.combine_masks([1, 1, 1], [1, 0, 0])
+        np.testing.assert_array_equal(masks["final_action_mask"], [1, 1, 1])
+        self.assertEqual(masks["safe_action_count"], 1)
+
+    def test_empty_safe_set_still_calls_rl(self):
+        from unittest.mock import Mock
+        from hrl_mix.train_utils import select_layer_action_with_info
+        shield = FuzzyDDLSafetyShield(enabled=True)
+        masks = shield.combine_masks([1, 1, 1], [0, 0, 0])
+        agent = Mock()
+        agent.select_action_with_info.return_value = {
+            "action": 2, "selection_type": "greedy_safe_action",
+        }
+        action, selected, mask, _ = select_layer_action_with_info(
+            agent, {**masks, "obs": np.zeros(2), "fallback_action": 0},
+            safe_rl_enabled=True, deterministic=True, count_step=False,
+        )
+        self.assertEqual(masks["safe_action_count"], 0)
+        self.assertTrue(selected)
+        self.assertEqual(action, 2)
+        np.testing.assert_array_equal(mask, [1, 1, 1])
+        agent.select_action_with_info.assert_called_once()
+
+    def test_one_safe_vm_keeps_all_legal_actions(self):
         shield = FuzzyDDLSafetyShield(enabled=True)
         masks = shield.build_vm_masks(
             [1, 1, 1],
@@ -56,7 +81,7 @@ class VMSafetyMaskTests(unittest.TestCase):
         )
         np.testing.assert_array_equal(
             masks["final_action_mask"],
-            [0, 1, 0],
+            [1, 1, 1],
         )
 
     def test_multiple_safe_vms_are_all_preserved(self):
@@ -72,7 +97,7 @@ class VMSafetyMaskTests(unittest.TestCase):
         )
         np.testing.assert_array_equal(
             masks["final_action_mask"],
-            [1, 1, 0],
+            [1, 1, 1],
         )
         self.assertEqual(masks["safe_action_count"], 2)
 
@@ -92,14 +117,14 @@ class VMSafetyMaskTests(unittest.TestCase):
         )
         np.testing.assert_array_equal(
             masks["final_action_mask"],
-            [0, 0, 1],
+            [1, 0, 1],
         )
 
 
 class HostSafetyMaskTests(unittest.TestCase):
     """验证 Host mask 完全由内部硬合法且安全的 VM 聚合。"""
 
-    def test_host_without_safe_vm_is_masked(self):
+    def test_host_without_safe_vm_remains_legal(self):
         shield = FuzzyDDLSafetyShield(enabled=True)
         masks = shield.build_host_masks(
             legal_action_mask=[1, 1],
@@ -111,10 +136,10 @@ class HostSafetyMaskTests(unittest.TestCase):
         )
         np.testing.assert_array_equal(
             masks["final_action_mask"],
-            [0, 1],
+            [1, 1],
         )
 
-    def test_all_hosts_without_safe_vm_require_empty_safe_set(self):
+    def test_all_hosts_without_safe_vm_still_accept_proposal(self):
         shield = FuzzyDDLSafetyShield(enabled=True)
         masks = shield.build_host_masks(
             legal_action_mask=[1, 1],
@@ -122,7 +147,7 @@ class HostSafetyMaskTests(unittest.TestCase):
         )
         np.testing.assert_array_equal(
             masks["final_action_mask"],
-            [0, 0],
+            [1, 1],
         )
         decision = shield.resolve_action(
             0,
@@ -131,12 +156,12 @@ class HostSafetyMaskTests(unittest.TestCase):
             fallback_action=1,
             layer="host",
         )
-        self.assertEqual(decision["executed_action"], 1)
-        self.assertTrue(decision["action_modified"])
-        self.assertTrue(decision["fallback_applied"])
+        self.assertEqual(decision["executed_action"], 0)
+        self.assertFalse(decision["action_modified"])
+        self.assertFalse(decision["fallback_applied"])
         self.assertEqual(
             decision["modification_reason"],
-            "no_safe_action_fallback",
+            "proposed_action_legal",
         )
 
 
@@ -180,7 +205,7 @@ class ShieldActionResolutionTests(unittest.TestCase):
         self.assertFalse(decision["action_modified"])
         self.assertTrue(decision["proposal_accepted"])
 
-    def test_unsafe_proposed_action_is_corrected_to_best_safe_action(self):
+    def test_unsafe_legal_proposal_is_preserved(self):
         shield = FuzzyDDLSafetyShield(enabled=True)
         masks = shield.combine_masks([1, 1, 1], [1, 0, 1])
         decision = shield.resolve_action(
@@ -194,15 +219,15 @@ class ShieldActionResolutionTests(unittest.TestCase):
             layer="vm",
         )
         self.assertEqual(decision["rl_proposed_action"], 1)
-        self.assertEqual(decision["executed_action"], 2)
-        self.assertTrue(decision["action_modified"])
+        self.assertEqual(decision["executed_action"], 1)
+        self.assertFalse(decision["action_modified"])
         self.assertFalse(decision["fallback_applied"])
         self.assertEqual(
             decision["modification_reason"],
-            "proposed_action_predicted_unsafe",
+            "proposed_action_legal",
         )
-        self.assertEqual(decision["predicted_risk"], 8.0)
-        self.assertEqual(decision["safety_margin"], 2.0)
+        self.assertEqual(decision["predicted_risk"], 12.0)
+        self.assertEqual(decision["safety_margin"], -2.0)
         self.assertTrue(
             {
                 "rl_proposed_action",
@@ -221,7 +246,7 @@ class ShieldActionResolutionTests(unittest.TestCase):
 class SafetyShieldEnvironmentIntegrationTests(unittest.TestCase):
     """验证空安全集由固定 VM 规则接管且 Manager 权重不变。"""
 
-    def test_all_unsafe_actions_use_fixed_vm_fallback_and_are_recorded(self):
+    def test_all_unsafe_actions_remain_rl_actions_and_are_recorded(self):
         config = SafeRLConfig()
         self.assertFalse(config.shield.enabled)
         self.assertEqual(
@@ -270,11 +295,11 @@ class SafetyShieldEnvironmentIntegrationTests(unittest.TestCase):
             float(np.sum(host_state["legal_action_mask"])),
             0.0,
         )
-        self.assertEqual(
+        self.assertGreater(
             float(np.sum(host_state["final_action_mask"])),
             0.0,
         )
-        self.assertTrue(host_state["safety_fallback_required"])
+        self.assertFalse(host_state["safety_fallback_required"])
         np.testing.assert_array_equal(
             host_state["mask"],
             host_state["legal_action_mask"],
@@ -284,24 +309,34 @@ class SafetyShieldEnvironmentIntegrationTests(unittest.TestCase):
                 "fallback_record"
             ]
         )
-        self.assertTrue(fallback_record["fallback_triggered"])
+        self.assertFalse(fallback_record["fallback_triggered"])
         self.assertEqual(
             fallback_record["fallback_reason"],
-            "empty_safe_action_set",
+            "legal_actions_delegated_to_rl",
         )
         self.assertEqual(fallback_record["candidate_count"], 2)
-        self.assertGreater(
+        self.assertEqual(
             fallback_record["minimum_violation"],
             0.0,
         )
 
+        # Demonstrations use the same complete legal candidate set.
+        from unittest.mock import patch
+        from hrl_mix.safe_demonstrations import _resolve_fixed_resource_actions
+        with patch.object(environment, "select_vm_deterministic",
+                          wraps=environment.select_vm_deterministic) as select_vm:
+            _, _, demonstration_fallback = _resolve_fixed_resource_actions(environment)
+        self.assertFalse(demonstration_fallback)
+        self.assertEqual(set(select_vm.call_args.kwargs["candidate_vm_ids"]),
+                         set(environment.vm_ids))
+
         proposed_host = int(np.argmax(host_state["mask"]))
         fallback_selection = {
             "action": proposed_host,
-            "proposed_action": None,
-            "selected_by_agent": False,
-            "selection_type": "fallback_action",
-            "policy_selection_type": "fallback_action",
+            "proposed_action": proposed_host,
+            "selected_by_agent": True,
+            "selection_type": "greedy_safe_action",
+            "policy_selection_type": "greedy_safe_action",
         }
         environment.host_select(
             proposed_host,
@@ -309,11 +344,11 @@ class SafetyShieldEnvironmentIntegrationTests(unittest.TestCase):
         )
         vm_state, has_vm = environment.get_vm_state_for_current_task()
         self.assertTrue(has_vm)
-        self.assertEqual(
+        self.assertGreater(
             float(np.sum(vm_state["final_action_mask"])),
             0.0,
         )
-        self.assertTrue(vm_state["safety_fallback_required"])
+        self.assertFalse(vm_state["safety_fallback_required"])
 
         proposed_vm = int(np.argmax(vm_state["mask"]))
         _, _, info = environment.vm_assign(
@@ -351,21 +386,21 @@ class SafetyShieldEnvironmentIntegrationTests(unittest.TestCase):
         self.assertEqual(info["manager_phase_id"], 0)
         host_decision = info["host_shield_decision"]
         vm_decision = info["vm_shield_decision"]
-        self.assertTrue(host_decision["fallback_applied"])
-        self.assertTrue(vm_decision["fallback_applied"])
-        self.assertTrue(host_decision["shield_intervened"])
-        self.assertTrue(vm_decision["shield_intervened"])
+        self.assertFalse(host_decision["fallback_applied"])
+        self.assertFalse(vm_decision["fallback_applied"])
+        self.assertFalse(host_decision["shield_intervened"])
+        self.assertFalse(vm_decision["shield_intervened"])
         for decision in (host_decision, vm_decision):
             self.assertEqual(
                 decision["action_source"],
-                "fallback_action",
+                "greedy_safe_action",
             )
-            self.assertIsNone(decision["proposed_action"])
-            self.assertFalse(decision["selected_by_agent"])
-            self.assertTrue(decision["fallback_triggered"])
+            self.assertEqual(decision["proposed_action"], decision["executed_action"])
+            self.assertTrue(decision["selected_by_agent"])
+            self.assertFalse(decision["fallback_triggered"])
             self.assertEqual(
                 decision["fallback_reason"],
-                "empty_safe_action_set",
+                "legal_actions_delegated_to_rl",
             )
             self.assertEqual(decision["candidate_count"], 2)
             self.assertEqual(
@@ -396,11 +431,11 @@ class SafetyShieldEnvironmentIntegrationTests(unittest.TestCase):
         )
         self.assertEqual(
             info["modification_reason"],
-            "no_safe_action_fallback",
+            "proposed_action_legal",
         )
         self.assertIn(info["vm_global_idx"], [0, 1])
         self.assertEqual(info["hard_constraint_violation"], 0)
-        self.assertTrue(info["fallback_triggered"])
+        self.assertFalse(info["fallback_triggered"])
         self.assertEqual(
             info["selected_vm"],
             fallback_record["selected_vm"],
@@ -412,10 +447,10 @@ class SafetyShieldEnvironmentIntegrationTests(unittest.TestCase):
         self.assertEqual(phase_info["shield_record_count"], 2)
         self.assertEqual(
             phase_info["shield_intervention_count"],
-            2,
+            0,
         )
-        self.assertEqual(phase_info["shield_fallback_count"], 2)
-        self.assertEqual(phase_info["fallback_action_count"], 2)
+        self.assertEqual(phase_info["shield_fallback_count"], 0)
+        self.assertEqual(phase_info["fallback_action_count"], 0)
         np.testing.assert_array_equal(
             environment.combo_weights,
             manager_weights_before,

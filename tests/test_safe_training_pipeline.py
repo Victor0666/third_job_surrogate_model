@@ -400,6 +400,7 @@ class SafeTrainingPipelineTests(unittest.TestCase):
                 },
                 heuristic_library_version={
                     "manifest_version": "legacy_v1",
+                    "recent_metrics": {"H1": {"safety_cost": [0.25]}},
                 },
                 config_snapshot={
                     "config_snapshot_schema_version": 1,
@@ -425,6 +426,10 @@ class SafeTrainingPipelineTests(unittest.TestCase):
                 payload,
                 agents=restored_agents,
                 lagrange_controller=restored_lagrange,
+            )
+            self.assertEqual(
+                payload["heuristic_library_version"]["recent_metrics"],
+                {"H1": {"safety_cost": [0.25]}},
             )
             self.assertEqual(
                 restored_controller.current_stage.stage_id,

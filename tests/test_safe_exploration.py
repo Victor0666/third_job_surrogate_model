@@ -144,7 +144,7 @@ class SafeExplorationTests(unittest.TestCase):
         self.assertIsNone(selection["proposed_action"])
         self.assertEqual(selection["executed_action"], 2)
 
-    def test_shield_correction_preserves_proposed_and_executed(self):
+    def test_shield_monitor_preserves_predicted_unsafe_proposal(self):
         shield = FuzzyDDLSafetyShield(enabled=True)
         masks = shield.combine_masks(
             [1.0, 1.0, 1.0, 0.0],
@@ -186,15 +186,15 @@ class SafeExplorationTests(unittest.TestCase):
             decision,
         )
         self.assertEqual(audit["proposed_action"], 1)
-        self.assertEqual(audit["executed_action"], 0)
-        self.assertTrue(audit["action_modified"])
+        self.assertEqual(audit["executed_action"], 1)
+        self.assertFalse(audit["action_modified"])
         self.assertEqual(
             audit["policy_selection_type"],
             "random_safe_exploration",
         )
         self.assertEqual(
             audit["action_source"],
-            "shield_correction",
+            "random_safe_exploration",
         )
 
     def test_replay_trains_executed_action_and_keeps_proposal_for_audit(self):

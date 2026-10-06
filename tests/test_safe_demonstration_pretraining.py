@@ -228,6 +228,37 @@ class DemonstrationDatasetTests(unittest.TestCase):
         )
         self.assertEqual(record["trajectory_count"]["total"], 3)
 
+    def test_old_safety_definition_requires_regeneration(self):
+        append_demonstration_episode(
+            self.manifest_path, _episode("train.safe", "train", 1, 11),
+            seed_split=_seed_split(),
+        )
+        manifest = json.loads(self.manifest_path.read_text(encoding="utf-8"))
+        manifest.pop("safety_cost_definition")
+        self.manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "regenerate demonstrations"):
+            load_demonstration_split(self.manifest_path, "train")
+        with self.assertRaisesRegex(ValueError, "regenerate demonstrations"):
+            append_demonstration_episode(
+                self.manifest_path, _episode("train.other", "train", 1, 11),
+                seed_split=_seed_split(),
+            )
+
+    def test_safety_learning_identity_is_saved_and_checked(self):
+        from hrl_mix.train_config import SafeRLConfig, safety_learning_identity
+        identity = safety_learning_identity(SafeRLConfig())
+        manifest = append_demonstration_episode(
+            self.manifest_path, _episode("train.safe", "train", 1, 11),
+            seed_split=_seed_split(), safe_rl_identity=identity,
+        )
+        self.assertEqual(manifest["safety_cost_definition"], "actual_deadline_violation")
+        self.assertEqual(manifest["safe_rl_identity"], identity)
+        load_demonstration_split(self.manifest_path, "train",
+                                 expected_safe_rl_identity=identity)
+        with self.assertRaisesRegex(ValueError, "config identity mismatch"):
+            load_demonstration_split(self.manifest_path, "train",
+                expected_safe_rl_identity={**identity, "cost_budget": 0.03})
+
     def _append_manager_identity_dataset(self):
         heuristic_ids = ("traditional_edf", "rule_B")
         manifest_hash = "a" * 64

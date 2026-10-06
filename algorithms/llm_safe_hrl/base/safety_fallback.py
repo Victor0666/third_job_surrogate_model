@@ -1,8 +1,6 @@
-"""空安全动作集合下的确定性模糊 DDL 回退控制器。
+"""预测风险回退的兼容诊断接口，以及 CEWS 共用的固定 VM 排序。
 
-该控制器复用 CEWS 固定 VM 规则在“候选全部延期”时的字典序核心：
-违反量、边际能耗、完成时间、稳定 VM ID。区别仅在于本模块消费阶段 3
-基于动态 ``D_safe`` 计算的违反量和风险完成时间，不修改 CEWS 原规则。
+合法候选始终交给 RL；资源不可用时由环境推进时间/等待。
 """
 
 from __future__ import annotations
@@ -64,7 +62,7 @@ def _inactive_record(reason: str, candidate_count: int) -> dict:
 
 
 class DeterministicFuzzyDDLFallbackController:
-    """按固定字典序选择一个硬合法 VM，并由该 VM 唯一确定 Host。
+    """保留原候选校验和诊断接口，但不按 predicted risk 接管 RL。
 
     候选必须提供 ``vm_id``、``host_id``、
     ``predicted_violation_amount``、``fuzzy_marginal_energy`` 和
@@ -179,63 +177,17 @@ class DeterministicFuzzyDDLFallbackController:
         safe_action_count: int,
         fallback_reason: str = "empty_safe_action_set",
     ) -> dict:
-        """在且仅在安全动作集合为空时选择确定性回退 VM。"""
+        """保留诊断接口；无 predicted-safe 动作时仍由 RL 选择合法动作。"""
         normalized = self._normalize_candidates(candidates)
         if not self.enabled:
             return _inactive_record(
                 "fallback_controller_disabled",
                 len(normalized),
             )
-        if int(safe_action_count) > 0:
-            return _inactive_record(
-                "safe_action_available",
-                len(normalized),
-            )
-        if not normalized:
-            raise RuntimeError(
-                "safe action set is empty but no hard-legal fallback "
-                "candidate is available"
-            )
-
-        candidates_by_host = {}
-        for row in normalized:
-            candidates_by_host.setdefault(row["host_id"], []).append(
-                row
-            )
-        host_best_candidates = [
-            select_vm_candidate_by_fixed_rule_order(
-                host_candidates,
-                _FALLBACK_METRIC_KEYS,
-            )
-            for _, host_candidates in sorted(
-                candidates_by_host.items()
-            )
-        ]
-        # 先求每个 Host 的内部最佳 VM，再用完全相同的全序比较这些代表项。
-        # 该两级选择与直接取全局最小等价，但显式保证 Host 不是任意选取。
-        selected = select_vm_candidate_by_fixed_rule_order(
-            host_best_candidates,
-            _FALLBACK_METRIC_KEYS,
-        )
-        return {
-            "fallback_triggered": True,
-            "fallback_reason": str(fallback_reason),
-            "candidate_count": int(len(normalized)),
-            "minimum_violation": float(
-                selected["predicted_violation_amount"]
-            ),
-            "selected_host": int(selected["host_id"]),
-            "selected_vm": int(selected["vm_id"]),
-            "tie_break_stage": self._tie_break_stage(normalized),
-            "selected_candidate": dict(selected),
-            "host_best_candidates": [
-                dict(row) for row in host_best_candidates
-            ],
-            "ranking_rule": (
-                "predicted_violation_amount -> "
-                "fuzzy_marginal_energy -> risk_finish -> stable_vm_id"
-            ),
-        }
+        # Candidates are hard-legal actions: predicted risk never bypasses RL.
+        if normalized:
+            return _inactive_record("legal_action_available", len(normalized))
+        return _inactive_record("no_legal_action", 0)
 
     @staticmethod
     def record_fields(record: Mapping) -> dict:

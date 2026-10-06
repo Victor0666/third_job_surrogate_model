@@ -2093,9 +2093,7 @@ class HrlHeftEnv(gym.Env):
                 getattr(self, "safe_rl_enabled", False)
             ),
             "safety_cost_aggregation": (
-                "delta_risk_weight * positive_delta_risk + "
-                "violation_weight * violation_cost + "
-                "lateness_weight * normalized_lateness"
+                "actual_deadline_violation"
             ),
             "process_risk_aggregation": (
                 f"{getattr(self, 'safe_rl_process_risk_aggregation', 'mean')}"
@@ -3318,14 +3316,7 @@ class HrlHeftEnv(gym.Env):
             raise ValueError("risk_before must be finite")
         positive_delta_risk = max(0.0, risk_after - risk_before)
         all_rows = workflow_safety + unfinished_rows
-        safety_cost = (
-            self.safe_rl_delta_risk_weight
-            * float(positive_delta_risk)
-            + self.safe_rl_violation_weight
-            * float(violation_cost)
-            + self.safe_rl_lateness_weight
-            * float(normalized_lateness)
-        )
+        safety_cost = float(violation_cost > 0.0)
 
         completed_count = len(completed_ids)
         violation_count = int(violation_cost)
@@ -4267,46 +4258,17 @@ class HrlHeftEnv(gym.Env):
                 }
             )
 
-        fallback_candidates = []
-        if (
-            self.safe_rl_shield_enabled
-            and host_masks["safe_action_count"] == 0
-        ):
-            # 只在真实空安全集时计算模糊边际能耗，避免正常安全动作路径引入
-            # 额外排序或改变 RL 的选择语义。
-            for vm_index, vm_id in enumerate(self.vm_ids):
-                if global_vm_legal[vm_index] <= 0.5:
-                    continue
-                row = vm_prediction_by_id.get(int(vm_id))
-                if row is None:
-                    continue
-                host_id = int(self.vms[int(vm_id)].host_id)
-                fallback_candidates.append(
-                    {
-                        "vm_id": int(vm_id),
-                        "host_id": host_id,
-                        "vm_global_index": int(vm_index),
-                        "host_action": int(
-                            self.host_ids.index(host_id)
-                        ),
-                        "predicted_violation_amount": float(
-                            row["predicted_violation_amount"]
-                        ),
-                        "fuzzy_marginal_energy": float(
-                            self.estimate_incremental_energy_score(
-                                task_id,
-                                vm_id,
-                            )
-                        ),
-                        "risk_finish": float(row["risk_finish"]),
-                    }
-                )
-
-        fallback_record = self.safety_fallback_controller.select(
-            fallback_candidates,
-            safe_action_count=int(host_masks["safe_action_count"]),
-            fallback_reason="empty_safe_action_set",
-        )
+        # No predicted-risk fallback: legal actions always remain selectable.
+        fallback_record = {
+            "fallback_triggered": False,
+            "fallback_reason": "legal_actions_delegated_to_rl",
+            "candidate_count": int(np.sum(global_vm_legal)),
+            "minimum_violation": 0.0,
+            "selected_host": None,
+            "selected_vm": None,
+            "tie_break_stage": "not_triggered",
+            "selected_candidate": None,
+        }
         fallback_vm_id = fallback_record["selected_vm"]
         fallback_vm_global_index = None
         fallback_host_action = None
@@ -4596,7 +4558,7 @@ class HrlHeftEnv(gym.Env):
         """安全集合为空时返回 legal mask，让旧 Agent 产生可审计的提议。
 
         环境随后不会直接执行该提议，而是由 shield 调用固定 VM 回退控制器。
-        真实空安全集合始终保存在 ``final_action_mask``，不会被伪装成安全动作。
+        ``final_action_mask`` 仅表达硬合法性，predicted safety 保留作诊断。
         """
         final_mask = np.asarray(
             mask_bundle["final_action_mask"],
@@ -4619,8 +4581,7 @@ class HrlHeftEnv(gym.Env):
         )
         return {
             "obs": np.asarray(obs, dtype=np.float32),
-            # 兼容字段：安全集合非空时为 final；空集合时为 legal，以便取得
-            # RL proposed action 后显式进入确定性回退。
+            # 兼容字段与最终 legal mask 一致；风险只作为诊断。
             "mask": policy_mask,
             "policy_action_mask": policy_mask.copy(),
             "legal_action_mask": np.asarray(
@@ -4937,6 +4898,7 @@ class HrlHeftEnv(gym.Env):
             self._phase_performance_reward = 0.0
             self._phase_performance_energy_delta = 0.0
             self._phase_heuristic_safety_cost = 0.0
+            self._phase_safety_transition_count = 0
             self._phase_safety_shield_records = []
 
         if not self._has_decision_point():
@@ -5431,10 +5393,10 @@ class HrlHeftEnv(gym.Env):
                 risk_before=process_risk_before_action
             )
         )
-        if self.manager_mode == HEURISTIC_SELECTION_MODE:
-            self._phase_heuristic_safety_cost += float(
-                info.get("safety_cost", 0.0)
-            )
+        self._phase_heuristic_safety_cost += float(
+            info.get("safety_cost", 0.0)
+        )
+        self._phase_safety_transition_count += 1
         self._attach_safety_shield_info(
             info,
             vm_decision,
@@ -5565,7 +5527,7 @@ class HrlHeftEnv(gym.Env):
                 0.0,
             )
             + float(info.get("safety_cost", 0.0))
-        )
+        ) / max(self._phase_safety_transition_count + 1, 1)
         phase_shield_records = [
             dict(record)
             for record in self._phase_safety_shield_records
@@ -5580,6 +5542,8 @@ class HrlHeftEnv(gym.Env):
             phase_shield_records
         )
         info.update(heuristic_audit)
+        info["manager_safety_cost"] = phase_heuristic_safety_cost
+        info["manager_safety_transition_count"] = self._phase_safety_transition_count + 1
         info["heuristic_phase_safety_cost"] = (
             phase_heuristic_safety_cost
         )
@@ -5615,6 +5579,7 @@ class HrlHeftEnv(gym.Env):
         self._phase_performance_reward = 0.0
         self._phase_performance_energy_delta = 0.0
         self._phase_heuristic_safety_cost = 0.0
+        self._phase_safety_transition_count = 0
         self._phase_safety_shield_records = []
         self._manager_phase_id += 1
 
@@ -5663,6 +5628,7 @@ class HrlHeftEnv(gym.Env):
         self._phase_performance_reward = 0.0
         self._phase_performance_energy_delta = 0.0
         self._phase_heuristic_safety_cost = 0.0
+        self._phase_safety_transition_count = 0
         self._phase_ready_task_ordering = []
 
         self._fuse_zero_assign_streak = 0
@@ -5790,6 +5756,7 @@ class HrlHeftEnv(gym.Env):
         self._safety_cumulative_process_risk_cost = 0.0
         self._safe_fuzzy_energy_score = 0.0
         self._phase_heuristic_safety_cost = 0.0
+        self._phase_safety_transition_count = 0
         self._phase_ready_task_ordering = []
         self._safety_shield_records = []
         self._phase_safety_shield_records = []
@@ -6419,6 +6386,25 @@ class HrlHeftEnv(gym.Env):
             ),
         }
         return result
+
+    def export_heuristic_history(self) -> dict:
+        return {
+            heuristic_id: {key: list(values) for key, values in metrics.items()}
+            for heuristic_id, metrics in self._heuristic_recent_metrics.items()
+        }
+
+    def restore_heuristic_history(self, history) -> None:
+        if set(history) != set(self._heuristic_recent_metrics):
+            raise ValueError("heuristic history IDs mismatch")
+        for heuristic_id, metrics in history.items():
+            target = self._heuristic_recent_metrics[heuristic_id]
+            if set(metrics) != set(target):
+                raise ValueError("heuristic history metric keys mismatch")
+            for key, values in metrics.items():
+                if not np.all(np.isfinite(values)):
+                    raise ValueError("heuristic history must be finite")
+                target[key].clear()
+                target[key].extend(float(value) for value in values)
 
     def _record_selected_heuristic_phase(
         self,

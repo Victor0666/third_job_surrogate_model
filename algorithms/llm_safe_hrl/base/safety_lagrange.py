@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """Episode 级共享拉格朗日安全控制器。
 
-Q_c 继续学习 dense ``safety_cost``；本控制器只消费 episode 实际工作流 DDL
+Q_c 仅学习 actual deadline violation ``safety_cost``；本控制器只消费 episode 实际工作流 DDL
 违反率。Manager、Host、VM 的动作评分共享同一个 ``lambda_DDL``。
 """
 
@@ -23,11 +23,11 @@ class LagrangeSafetyController:
         self,
         *,
         enabled: bool = False,
-        lambda_init: float = 1.0,
-        lambda_lr: float = 0.05,
+        lambda_init: float = 0.5,
+        lambda_lr: float = 0.02,
         lambda_min: float = 0.0,
         lambda_max: float = 100.0,
-        cost_budget: float = 0.01,
+        cost_budget: float = 0.02,
         update_interval: int = 1,
         cost_ema_factor: float = 0.9,
         warmup_steps: int = 0,

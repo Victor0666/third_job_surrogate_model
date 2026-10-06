@@ -2,8 +2,8 @@
 
 The Manager action is a fixed admitted heuristic index for each phase.  The
 heuristic orders ready tasks only.  Resource actions are selected with the
-environment's existing deterministic VM rule from the safe/legal VM set; when
-that set is empty, the environment's deterministic safety fallback is used.
+environment's existing deterministic VM rule from all hard-legal VMs.
+Predicted safety remains diagnostic and never prunes legal resource actions.
 """
 
 from __future__ import annotations
@@ -203,7 +203,7 @@ def _resolve_fixed_resource_actions(env) -> tuple[int, int, bool]:
         )
         if global_vm_index is None:
             raise RuntimeError(
-                "empty safe VM set has no deterministic fallback"
+                "no hard-legal VM is available for demonstration placement"
             )
         global_vm_index = int(global_vm_index)
     else:
@@ -501,7 +501,7 @@ def generate_safe_demonstration_episode(
         )
         manager_cost = float(
             phase_info.get(
-                "heuristic_phase_safety_cost",
+                "manager_safety_cost",
                 phase_info.get("safety_cost", 0.0),
             )
         )

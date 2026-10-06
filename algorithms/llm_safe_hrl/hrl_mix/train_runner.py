@@ -57,6 +57,7 @@ from hrl_mix.safe_metrics import (
     build_episode_metric_record,
 )
 from hrl_mix.train_config import (
+    safety_learning_identity,
     build_train_config,
     environment_scenario_values,
 )
@@ -271,15 +272,16 @@ def _checkpoint_runtime_metadata(
             layer: build_replay_metadata(agent)
             for layer, agent in agents.items()
         },
-        "heuristic_library_version": (
-            build_heuristic_library_version(
+        "heuristic_library_version": {
+            "recent_metrics": env.export_heuristic_history(),
+            **build_heuristic_library_version(
                 env,
                 manifest_path=(
                     cfg.safe_rl.manager_heuristics
                     .library_manifest_path
                 ),
             )
-        ),
+        },
         "experiment_protocol": (
             None
             if cfg.experiment_protocol is None
@@ -669,7 +671,9 @@ def train(
     source_scenario: str | None = None,
     resource_scale: str | None = None,
     validation_workers: int = 3,
-    safe_rl_lambda_lr: float = 0.05,
+    safe_rl_lambda_lr: float = 0.02,
+    safe_rl_cost_budget: float = 0.02,
+    safe_rl_lambda_init: float = 0.5,
 ):
     """执行一次完整训练
 
@@ -693,6 +697,8 @@ def train(
             safe_rl_dynamic_lambda_enabled
         ),
         safe_rl_lambda_lr=safe_rl_lambda_lr,
+        safe_rl_cost_budget=safe_rl_cost_budget,
+        safe_rl_lambda_init=safe_rl_lambda_init,
         safe_rl_heuristic_manager_enabled=(
             safe_rl_heuristic_manager_enabled
         ),
@@ -910,6 +916,19 @@ def train(
             )
         env = EnvCls(**_environment_ctor_kwargs(env_kwargs)) # 创建环境
         env.reset() # 初始化环境， 函数为自己创建
+
+    if training_resume_payload is not None:
+        stored_safe_rl = training_resume_payload["config_snapshot"]["config"]["safe_rl"]
+        current_safe_rl = build_config_snapshot(cfg)["config"]["safe_rl"]
+        if any(stored_safe_rl.get(key) != current_safe_rl[key] for key in (
+            "safety_cost_definition", "shield_semantics", "lagrangian",
+            "safety_discount", "fuzzy_deadline_eta", "manager_heuristics",
+        )):
+            raise ValueError("Safe-RL resume config mismatch; regenerate incompatible checkpoints")
+        env.restore_heuristic_history(
+            training_resume_payload["heuristic_library_version"].get("recent_metrics", {})
+        )
+    heuristic_history = env._heuristic_recent_metrics  # Owned by this training run.
 
     # 将配置中的 reward/归一化尺度写入训练环境（手动化写入参数）
     apply_env_scales(env, cfg)
@@ -1202,6 +1221,7 @@ def train(
         pretraining_report = pretrain_agents_from_demonstrations(
             agents_by_layer,
             cfg.safe_rl.offline_pretraining,
+            safe_rl_identity=safety_learning_identity(cfg.safe_rl),
             **pretraining_identity,
         )
     else:
@@ -2223,6 +2243,9 @@ def train(
                     apply_env_scales(env, cfg)
                     _sync_env_kwargs_scales(next_env_kwargs, env)
                     env_kwargs = next_env_kwargs
+            if set(heuristic_history) != set(env._heuristic_recent_metrics):
+                raise ValueError("heuristic history IDs changed within training run")
+            env._heuristic_recent_metrics = heuristic_history
             pending_host_transition = None
             pending_vm_transition = None
 
@@ -2668,7 +2691,7 @@ def train(
                     pinfo.get("performance_reward", r_manager_raw),
                 )
             ),
-            safety_cost=float(phase_safety["safety_cost"]),
+            safety_cost=float(pinfo["manager_safety_cost"]),
             positive_delta_risk=float(
                 phase_safety["positive_delta_risk"]
             ),
@@ -2864,7 +2887,7 @@ def train(
                     sH_next,
                     m_mask_next,
                     float(env.done_flag),
-                    cost=float(phase_safety["safety_cost"]),
+                    cost=float(pinfo["manager_safety_cost"]),
                     proposed_action=m_action_audit[
                         "proposed_action"
                     ],

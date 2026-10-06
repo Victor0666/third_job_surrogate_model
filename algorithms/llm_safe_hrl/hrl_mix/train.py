@@ -119,11 +119,13 @@ def main(argv=None):
             "controller. Requires --safe-rl; default is off."
         ),
     )
+    parser.add_argument("--safe-rl-cost-budget", type=float, default=0.02)
+    parser.add_argument("--safe-rl-lambda-init", type=float, default=0.5)
     parser.add_argument(
         "--safe-rl-lambda-lr",
         type=float,
-        default=0.05,
-        help="Episode violation-rate Lagrange learning rate (default: 0.05).",
+        default=0.02,
+        help="Episode violation-rate Lagrange learning rate (default: 0.02).",
     )
     parser.add_argument(
         "--safe-rl-heuristic-manager",
@@ -306,6 +308,8 @@ def main(argv=None):
             args.safe_rl_dynamic_lambda
         ),
         safe_rl_lambda_lr=args.safe_rl_lambda_lr,
+        safe_rl_cost_budget=args.safe_rl_cost_budget,
+        safe_rl_lambda_init=args.safe_rl_lambda_init,
         safe_rl_heuristic_manager_enabled=(
             args.safe_rl_heuristic_manager
         ),

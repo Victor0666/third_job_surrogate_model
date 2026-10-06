@@ -26,7 +26,7 @@ from hrl_mix.safe_demonstrations import (
     DemonstrationGenerationOptions,
     generate_safe_demonstration_episode,
 )
-from hrl_mix.train_config import build_train_config
+from hrl_mix.train_config import build_train_config, safety_learning_identity
 from hrl_mix.train_utils import apply_env_scales
 
 
@@ -127,6 +127,9 @@ def main(argv=None):
         )
     )
     parser.add_argument("--manifest", required=True)
+    parser.add_argument("--safe-rl-cost-budget", type=float, default=0.02)
+    parser.add_argument("--safe-rl-lambda-init", type=float, default=0.5)
+    parser.add_argument("--safe-rl-lambda-lr", type=float, default=0.02)
     parser.add_argument(
         "--manager-heuristic-manifest",
         required=True,
@@ -200,6 +203,9 @@ def main(argv=None):
         ddl=args.ddl,
         max_episodes=1,
         safe_rl_enabled=True,
+        safe_rl_cost_budget=args.safe_rl_cost_budget,
+        safe_rl_lambda_init=args.safe_rl_lambda_init,
+        safe_rl_lambda_lr=args.safe_rl_lambda_lr,
         safe_rl_shield_enabled=True,
         safe_rl_state_enabled=True,
         safe_rl_heuristic_manager_enabled=True,
@@ -251,6 +257,7 @@ def main(argv=None):
                 heuristic.heuristic_id
                 for heuristic in env.manager_heuristics
             ),
+            safe_rl_identity=safety_learning_identity(cfg.safe_rl),
             manager_heuristic_manifest_sha256=(
                 manager_manifest_sha256
             ),

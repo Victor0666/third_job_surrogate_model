@@ -136,11 +136,11 @@ class LagrangianSafetyConfig:
     """阶段 8 episode 违反率动态拉格朗日配置，默认关闭。"""
 
     enabled: bool = False
-    lambda_init: float = 1.0
-    lambda_lr: float = 0.05
+    lambda_init: float = 0.5
+    lambda_lr: float = 0.02
     lambda_min: float = 0.0
     lambda_max: float = 100.0
-    cost_budget: float = 0.01
+    cost_budget: float = 0.02
     update_interval: int = 1
     cost_ema_factor: float = 0.9
     # 单位是已经完成并观测的 episode 数，不是 transition/global step。
@@ -382,6 +382,8 @@ class SafeMetricsConfig:
 class SafeRLConfig:
     """安全强化学习分阶段配置；默认不启用安全训练语义。"""
 
+    safety_cost_definition: str = "actual_deadline_violation"
+    shield_semantics: str = "monitor_only"
     enabled: bool = False
     safety_discount: float = 0.99
     safety_learning_rate: float = 3e-4
@@ -746,7 +748,9 @@ def build_train_config(
     require_deadline_cache: bool = True,
     deadline_cache_override: str | Path | None = None,
     deadline_cache_paths: Mapping[str, str] | None = None,
-    safe_rl_lambda_lr: float = 0.05,
+    safe_rl_lambda_lr: float = 0.02,
+    safe_rl_cost_budget: float = 0.02,
+    safe_rl_lambda_init: float = 0.5,
 ) -> TrainConfig:
     """根据命令行参数构造完整训练配置。
 
@@ -1057,6 +1061,10 @@ def build_train_config(
             "curriculum_enabled": bool(safe_rl_curriculum_enabled),
             "optimizer_seed": int(optimizer_seed),
         }
+        safe_name_payload["safety_cost_definition"] = "actual_deadline_violation"
+        safe_name_payload["shield_semantics"] = "monitor_only"
+        safe_name_payload["cost_budget"] = float(safe_rl_cost_budget)
+        safe_name_payload["lambda_init"] = float(safe_rl_lambda_init)
         if safe_rl_dynamic_lambda_enabled:
             safe_name_payload["lambda_lr"] = float(
                 safe_rl_lambda_lr
@@ -1080,7 +1088,10 @@ def build_train_config(
                 else ":without_curriculum"
             )
             + f":optimizer_seed={int(optimizer_seed)}"
-            + f":lambda_lr={float(safe_rl_lambda_lr):.17g}",
+            + f":lambda_lr={float(safe_rl_lambda_lr):.17g}"
+            + f":cost_budget={float(safe_rl_cost_budget):.17g}"
+            + f":lambda_init={float(safe_rl_lambda_init):.17g}"
+            + ":monitor_only:actual_deadline_violation",
         )
     if protocol_context is None:
         output_paths = training_output_paths(ROOT_DIR, run_name)
@@ -1196,11 +1207,11 @@ def build_train_config(
             ),
             lagrangian=LagrangianSafetyConfig(
                 enabled=bool(safe_rl_dynamic_lambda_enabled),
-                lambda_init=1.0,
+                lambda_init=float(safe_rl_lambda_init),
                 lambda_lr=float(safe_rl_lambda_lr),
                 lambda_min=0.0,
                 lambda_max=100.0,
-                cost_budget=0.01,
+                cost_budget=float(safe_rl_cost_budget),
                 update_interval=1,
                 cost_ema_factor=0.9,
                 warmup_steps=0,
@@ -1376,3 +1387,22 @@ def build_train_config(
             hidden_dims=(512, 512, 256, 128),
         ),
     )
+
+
+def safety_learning_identity(config: SafeRLConfig) -> dict:
+    """Constraint and observation semantics shared by demonstrations and Qc."""
+    keys = (
+        "safety_cost_definition", "shield_semantics", "safety_discount",
+        "fuzzy_deadline_eta", "process_risk_aggregation", "lateness_normalizer",
+        "lateness_clip", "fuzzy_energy_uncertainty_weight",
+    )
+    return {
+        **{key: getattr(config, key) for key in keys},
+        "shield_enabled": config.shield.enabled,
+        "state_enabled": config.state.enabled,
+        "high_uncertainty_threshold": config.state.high_uncertainty_threshold,
+        "recent_record_window": config.state.recent_record_window,
+        "cost_budget": config.lagrangian.cost_budget,
+        "lambda_init": config.lagrangian.lambda_init,
+        "lambda_lr": config.lagrangian.lambda_lr,
+    }

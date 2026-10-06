@@ -364,6 +364,7 @@ def pretrain_agents_from_demonstrations(
     *,
     manager_heuristic_ids: Sequence[str] | None = None,
     manager_heuristic_manifest_sha256: str | None = None,
+    safe_rl_identity: Mapping | None = None,
 ) -> dict:
     """在严格 train/validation 数据上离线初始化三层双价值网络。"""
     if not options.enabled:
@@ -375,6 +376,7 @@ def pretrain_agents_from_demonstrations(
         options.dataset_manifest_path,
         "train",
         require_safe=True,
+        expected_safe_rl_identity=safe_rl_identity,
         expected_manager_heuristic_ids=manager_heuristic_ids,
         expected_manager_heuristic_manifest_sha256=(
             manager_heuristic_manifest_sha256
@@ -384,6 +386,7 @@ def pretrain_agents_from_demonstrations(
         options.dataset_manifest_path,
         "validation",
         require_safe=True,
+        expected_safe_rl_identity=safe_rl_identity,
         expected_manager_heuristic_ids=manager_heuristic_ids,
         expected_manager_heuristic_manifest_sha256=(
             manager_heuristic_manifest_sha256

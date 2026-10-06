@@ -155,11 +155,11 @@ class LagrangeSafetyControllerTests(unittest.TestCase):
             )
         lagrange = config.safe_rl.lagrangian
         self.assertTrue(lagrange.enabled)
-        self.assertEqual(lagrange.lambda_init, 1.0)
-        self.assertEqual(lagrange.lambda_lr, 0.05)
+        self.assertEqual(lagrange.lambda_init, 0.5)
+        self.assertEqual(lagrange.lambda_lr, 0.02)
         self.assertEqual(lagrange.lambda_min, 0.0)
         self.assertEqual(lagrange.lambda_max, 100.0)
-        self.assertEqual(lagrange.cost_budget, 0.01)
+        self.assertEqual(lagrange.cost_budget, 0.02)
         self.assertEqual(lagrange.update_interval, 1)
         self.assertEqual(lagrange.cost_ema_factor, 0.9)
         self.assertEqual(lagrange.warmup_steps, 0)
@@ -174,6 +174,28 @@ class LagrangeSafetyControllerTests(unittest.TestCase):
                 safe_rl_lambda_lr=0.2,
             )
         self.assertEqual(config.safe_rl.lagrangian.lambda_lr, 0.2)
+
+    def test_new_budget_updates_lambda_in_correct_direction(self):
+        for rate, grows in ((0.01, False), (0.03, True)):
+            controller = LagrangeSafetyController(enabled=True)
+            before = controller.current_lambda
+            controller.observe_episode(episode_violation_rate=rate)
+            self.assertEqual(controller.current_lambda > before, grows)
+
+    def test_constraint_overrides_change_config_and_identity(self):
+        from hrl_mix.model_selection import build_config_snapshot
+        with patch("hrl_mix.train_config.os.makedirs"):
+            default = build_train_config(safe_rl_enabled=True)
+            changed = build_train_config(
+                safe_rl_enabled=True, safe_rl_cost_budget=0.03,
+                safe_rl_lambda_init=0.7, safe_rl_lambda_lr=0.04,
+            )
+        self.assertEqual(changed.safe_rl.lagrangian.cost_budget, 0.03)
+        self.assertEqual(changed.safe_rl.lagrangian.lambda_init, 0.7)
+        self.assertEqual(changed.safe_rl.lagrangian.lambda_lr, 0.04)
+        self.assertNotEqual(default.run_name, changed.run_name)
+        self.assertNotEqual(build_config_snapshot(default)["sha256"],
+                            build_config_snapshot(changed)["sha256"])
 
     def test_run_names_are_short_stable_and_safe_modes_are_distinct(self):
         with patch("hrl_mix.train_config.os.makedirs"):

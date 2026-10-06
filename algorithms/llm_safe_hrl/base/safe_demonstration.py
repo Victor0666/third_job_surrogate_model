@@ -25,7 +25,7 @@ from base.safe_replay import (
 SAFE_DEMONSTRATION_DATASET_SCHEMA_VERSION = 1
 SAFE_DEMONSTRATION_EPISODE_SCHEMA_VERSION = 1
 SAFE_DEMONSTRATION_GENERATOR_POLICY = (
-    "safe_heuristic_fixed_vm_deterministic_fallback_v1"
+    "heuristic_legal_vm_monitor_only_v2"
 )
 DEMONSTRATION_LAYERS = ("manager", "host", "vm")
 TRAINING_SPLITS = frozenset({"train", "validation"})
@@ -123,6 +123,15 @@ def _validate_manager_heuristic_identity(
             "Manager heuristic manifest hash mismatch between "
             "demonstration and current training"
         )
+
+
+def _validate_safety_definition(manifest, expected_identity=None) -> None:
+    if manifest.get("safety_cost_definition") != "actual_deadline_violation":
+        raise ValueError("safety-cost definition mismatch; regenerate demonstrations")
+    if manifest.get("shield_semantics") != "monitor_only":
+        raise ValueError("shield semantics mismatch; regenerate demonstrations")
+    if expected_identity is not None and manifest.get("safe_rl_identity") != expected_identity:
+        raise ValueError("Safe-RL config identity mismatch; regenerate demonstrations")
 
 
 def _finite(value, name: str) -> float:
@@ -733,6 +742,7 @@ def append_demonstration_episode(
     dataset_version: str = "2026-07-28.stage13.v1",
     manager_heuristic_ids: Sequence[str] | None = None,
     manager_heuristic_manifest_sha256: str | None = None,
+    safe_rl_identity: Mapping | None = None,
 ) -> dict:
     """原子写入 episode 并追加 manifest；不覆盖已有 ID。"""
     path = Path(manifest_path).resolve()
@@ -750,6 +760,7 @@ def append_demonstration_episode(
     )
     if path.exists():
         manifest = json.loads(path.read_text(encoding="utf-8"))
+        _validate_safety_definition(manifest, safe_rl_identity)
         if (
             manifest.get("schema_version")
             != SAFE_DEMONSTRATION_DATASET_SCHEMA_VERSION
@@ -809,6 +820,9 @@ def append_demonstration_episode(
             "dataset_id": str(dataset_id),
             "dataset_version": str(dataset_version),
             "manifest_revision": 0,
+            "safety_cost_definition": "actual_deadline_violation",
+            "shield_semantics": "monitor_only",
+            "safe_rl_identity": dict(safe_rl_identity or {}),
             "generator_policy": (
                 SAFE_DEMONSTRATION_GENERATOR_POLICY
             ),
@@ -964,6 +978,7 @@ def load_demonstration_split(
     require_safe: bool = True,
     expected_manager_heuristic_ids: Sequence[str] | None = None,
     expected_manager_heuristic_manifest_sha256: str | None = None,
+    expected_safe_rl_identity: Mapping | None = None,
 ) -> dict:
     """严格加载 train/validation；final_test 永不作为预训练数据返回。"""
     selected_split = str(split).strip().lower()
@@ -974,6 +989,7 @@ def load_demonstration_split(
         )
     path = Path(manifest_path).resolve()
     manifest = json.loads(path.read_text(encoding="utf-8"))
+    _validate_safety_definition(manifest, expected_safe_rl_identity)
     if (
         manifest.get("schema_version")
         != SAFE_DEMONSTRATION_DATASET_SCHEMA_VERSION

@@ -514,6 +514,69 @@ class HeuristicSelectionManagerTests(unittest.TestCase):
     def tearDown(self):
         self.temporary_directory.cleanup()
 
+    def test_history_survives_episode_reset_and_new_environment(self):
+        environment = self.environment
+        environment.apply_manager_heuristic(5)
+        environment._record_selected_heuristic_phase(
+            performance_reward=-2.0, safety_cost=0.25,
+            shield_intervention_rate=0.0,
+        )
+        history = environment.export_heuristic_history()
+        environment.reset()
+        self.assertEqual(environment.export_heuristic_history(), history)
+        episode2 = _make_environment(
+            manager_mode=HEURISTIC_SELECTION_MODE, manifest_path=self.manifest,
+        )
+        episode2.restore_heuristic_history(history)
+        self.assertEqual(episode2.export_heuristic_history(), history)
+        new_run = _make_environment(
+            manager_mode=HEURISTIC_SELECTION_MODE, manifest_path=self.manifest,
+        )
+        self.assertEqual(list(new_run._heuristic_recent_metrics[
+            "test_llm_safe"]["safety_cost"]), [])
+
+    def test_checkpoint_metadata_contains_serializable_history(self):
+        from dataclasses import replace
+        from hrl_mix.train_config import build_train_config
+        from hrl_mix.train_runner import _checkpoint_runtime_metadata
+        environment = self.environment
+        environment.apply_manager_heuristic(5)
+        environment._record_selected_heuristic_phase(
+            performance_reward=-2.0, safety_cost=0.25,
+            shield_intervention_rate=0.0,
+        )
+        with mock.patch("hrl_mix.train_config.os.makedirs"):
+            config = build_train_config(safe_rl_enabled=True)
+        config = replace(config, safe_rl=replace(config.safe_rl,
+            manager_heuristics=replace(config.safe_rl.manager_heuristics,
+                                      library_manifest_path=str(self.manifest))))
+        metadata = _checkpoint_runtime_metadata(
+            cfg=config, env=environment, agents={}, training_controller=None,
+        )
+        stored = json.loads(json.dumps(metadata))["heuristic_library_version"]["recent_metrics"]
+        episode2 = _make_environment(
+            manager_mode=HEURISTIC_SELECTION_MODE, manifest_path=self.manifest,
+        )
+        episode2.restore_heuristic_history(stored)
+        self.assertEqual(episode2.export_heuristic_history(),
+                         environment.export_heuristic_history())
+
+    def test_manager_phase_cost_is_mean_violation_indicator(self):
+        from unittest.mock import patch
+        environment = self.environment
+        environment.apply_manager_heuristic(5)
+        costs = [0.0, 0.0, 1.0, 0.0]
+        environment._phase_heuristic_safety_cost = sum(costs[:-1])
+        environment._phase_safety_transition_count = len(costs) - 1
+        with patch.object(environment, "get_safety_diagnostics",
+                          return_value={"safety_cost": costs[-1]}):
+            _, info = environment.finish_phase_and_advance()
+        self.assertEqual(info["manager_safety_cost"], 0.25)
+        self.assertEqual(info["heuristic_phase_safety_cost"], 0.25)
+        self.assertEqual(info["manager_safety_transition_count"], 4)
+        self.assertEqual(list(environment._heuristic_recent_metrics[
+            "test_llm_safe"]["safety_cost"]), [0.25])
+
     def test_manager_selects_traditional_heuristic_rule(self):
         environment = self.environment
         # SJF 是动作 1，排序应直接使用历史五维特征的第 1 列。

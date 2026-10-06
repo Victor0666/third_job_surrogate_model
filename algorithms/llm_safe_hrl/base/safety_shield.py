@@ -1,4 +1,4 @@
-"""独立的模糊 DDL 动作屏蔽与修正逻辑。
+"""独立的模糊 DDL 风险监测与硬合法性校验。
 
 本模块只处理动作掩码、确定性修正和审计记录，不依赖 D3QN、runner 或环境
 内部状态。任务完成时间和安全边界仍由环境预测，本模块消费统一的预测字段。
@@ -22,7 +22,7 @@ def _binary_mask(values, *, name: str) -> np.ndarray:
 
 
 class FuzzyDDLSafetyShield:
-    """构造安全动作集合并修正不安全的 Host/VM 动作。
+    """监测预测风险，仅按硬合法性限制 Host/VM 动作。
 
     ``enabled=False`` 时，``final_action_mask`` 严格等于硬合法性掩码，
     ``resolve_action`` 原样返回 RL 动作，因而不会改变旧执行行为。
@@ -53,7 +53,7 @@ class FuzzyDDLSafetyShield:
         safe_intersection = (
             (legal > 0.5) & (safety > 0.5)
         ).astype(np.float32)
-        final = safe_intersection if self.enabled else legal.copy()
+        final = legal.copy()
         return {
             "legal_action_mask": legal,
             "safety_action_mask": safety,
@@ -161,7 +161,7 @@ class FuzzyDDLSafetyShield:
         fallback_action: int | None = None,
         layer: str,
     ) -> dict:
-        """接受安全提议、修正不安全提议，或在空安全集时交给回退动作。"""
+        """接受所有合法提议；仅修正硬非法动作。"""
         legal = _binary_mask(
             mask_bundle["legal_action_mask"],
             name="legal_action_mask",
@@ -185,9 +185,7 @@ class FuzzyDDLSafetyShield:
         proposed_safe = bool(
             proposed_in_range and safety[proposed] > 0.5
         )
-        proposed_final = bool(
-            proposed_in_range and final[proposed] > 0.5
-        )
+        final = legal.copy()
 
         fallback_applied = False
         proposal_accepted = False
@@ -195,12 +193,12 @@ class FuzzyDDLSafetyShield:
             executed = proposed
             reason = "shield_disabled"
             proposal_accepted = True
-        elif proposed_final:
+        elif proposed_legal:
             executed = proposed
-            reason = "proposed_action_safe"
+            reason = "proposed_action_legal"
             proposal_accepted = True
         else:
-            final_actions = np.flatnonzero(final > 0.5)
+            final_actions = np.flatnonzero(legal > 0.5)
             if final_actions.size > 0:
                 executed = min(
                     (int(action) for action in final_actions),
@@ -209,31 +207,11 @@ class FuzzyDDLSafetyShield:
                         action_metrics,
                     ),
                 )
-                reason = (
-                    "proposed_action_hard_illegal"
-                    if not proposed_legal
-                    else "proposed_action_predicted_unsafe"
-                )
+                reason = "proposed_action_hard_illegal"
             else:
-                if fallback_action is None:
-                    raise RuntimeError(
-                        f"{layer} safety action set is empty and no "
-                        "fallback action was provided"
-                    )
-                fallback = int(fallback_action)
-                if fallback < 0 or fallback >= legal.size:
-                    raise ValueError(
-                        f"{layer} fallback action is out of range: "
-                        f"{fallback}"
-                    )
-                if legal[fallback] <= 0.5:
-                    raise ValueError(
-                        f"{layer} fallback action violates the hard "
-                        f"legal mask: {fallback}"
-                    )
-                executed = fallback
-                reason = "no_safe_action_fallback"
-                fallback_applied = True
+                raise RuntimeError(
+                    f"{layer} has no hard-legal action; use environment wait/no-placement"
+                )
 
         executed_metric = self._metric(action_metrics, executed)
         proposed_metric = (

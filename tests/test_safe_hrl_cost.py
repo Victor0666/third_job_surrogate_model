@@ -89,11 +89,11 @@ class SafeWorkflowCostTests(unittest.TestCase):
             info["normalized_lateness"], 1.9 / 300.0
         )
         self.assertAlmostEqual(
-            info["safety_cost"], 1.0 + 1.9 / 300.0
+            info["safety_cost"], 1.0
         )
         self.assertEqual(info["deadline_violation_count"], 1)
 
-    def test_raw_lateness_is_normalized_before_entering_qc(self):
+    def test_raw_lateness_is_diagnostic_only(self):
         environment = _safety_stub(
             deadline=100.0,
             finish_tfn=TriangularFuzzyNumber(700.0, 700.0, 700.0),
@@ -104,7 +104,7 @@ class SafeWorkflowCostTests(unittest.TestCase):
         self.assertEqual(info["normalized_lateness"], 2.0)
         self.assertEqual(info["cumulative_fuzzy_lateness_cost"], 600.0)
         self.assertEqual(info["cumulative_normalized_lateness"], 2.0)
-        self.assertEqual(info["safety_cost"], 3.0)
+        self.assertEqual(info["safety_cost"], 1.0)
 
     def test_decreasing_process_risk_has_zero_delta_cost(self):
         environment = _safety_stub(
@@ -126,7 +126,18 @@ class SafeWorkflowCostTests(unittest.TestCase):
         info = environment.get_safety_diagnostics(risk_before=0.5)
         self.assertAlmostEqual(info["process_risk_after"], 0.7)
         self.assertAlmostEqual(info["positive_delta_risk"], 0.2)
-        self.assertAlmostEqual(info["safety_cost"], 0.1)
+        self.assertAlmostEqual(info["safety_cost"], 0.0)
+
+    def test_predicted_lateness_and_risk_increase_do_not_enter_qc(self):
+        environment = _safety_stub(
+            deadline=10.0, finish_tfn=None,
+            predicted_tfn=TriangularFuzzyNumber(12.0, 12.0, 12.0),
+        )
+        info = environment.get_safety_diagnostics(risk_before=0.0)
+        self.assertGreater(info["positive_delta_risk"], 0.0)
+        self.assertGreater(info["predicted_deadline_violation_count"], 0)
+        self.assertEqual(info["deadline_violation_count"], 0)
+        self.assertEqual(info["safety_cost"], 0.0)
 
     def test_completed_workflow_is_not_charged_twice(self):
         environment = _safety_stub(
