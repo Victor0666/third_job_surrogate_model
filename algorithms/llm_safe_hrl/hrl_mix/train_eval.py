@@ -240,6 +240,16 @@ def evaluate_one_seed(
 
     eval_env.reset()
 
+    # Reject old observation dimensions before taking any evaluation action.
+    for layer, agent in (("host", host_agent), ("vm", vm_agent), ("manager", manager_agent)):
+        expected = getattr(eval_env, f"{layer}_obs_dim", None)
+        actual = getattr(agent, "input_dim", None)
+        if expected is not None and actual is not None and int(actual) != int(expected):
+            raise ValueError(
+                f"{layer} checkpoint observation dimension mismatch: "
+                f"checkpoint={actual}, environment={expected}"
+            )
+
     # ------------------------------------------------------------
     # Initial Manager decision
     # ------------------------------------------------------------

@@ -68,7 +68,7 @@ def _assert_extension_in_schema(
 
 
 class SafeObservationCompatibilityTests(unittest.TestCase):
-    def test_default_and_safe_rl_without_state_keep_legacy_dimensions(self):
+    def test_energy_extension_requires_safe_rl_but_not_safety_state(self):
         config = SafeRLConfig()
         self.assertFalse(config.enabled)
         self.assertFalse(config.state.enabled)
@@ -95,11 +95,11 @@ class SafeObservationCompatibilityTests(unittest.TestCase):
             self.assertEqual(environment.manager_obs_dim, 15)
             self.assertEqual(
                 environment.host_obs_dim,
-                environment.host_legacy_obs_dim,
+                environment.host_legacy_obs_dim + (2 * environment.num_hosts if environment.safe_rl_enabled else 0),
             )
             self.assertEqual(
                 environment.vm_obs_dim,
-                environment.vm_legacy_obs_dim,
+                environment.vm_legacy_obs_dim + (environment.max_vms_per_host if environment.safe_rl_enabled else 0),
             )
             self.assertEqual(
                 environment.get_manager_state().shape,
@@ -131,12 +131,12 @@ class SafeObservationSchemaTests(unittest.TestCase):
         self.assertEqual(
             environment.host_obs_dim,
             environment.host_legacy_obs_dim
-            + environment.num_hosts * 6,
+            + environment.num_hosts * 8,
         )
         self.assertEqual(
             environment.vm_obs_dim,
             environment.vm_legacy_obs_dim
-            + environment.max_vms_per_host * 12,
+            + environment.max_vms_per_host * 13,
         )
         for layer in ("manager", "host", "vm"):
             self.assertEqual(
@@ -176,11 +176,11 @@ class SafeObservationSchemaTests(unittest.TestCase):
         host_schema = environment.get_observation_schema("host")
         _assert_extension_in_schema(
             self,
-            host_state["obs"][host_schema["legacy_dim"] :],
+            host_state["obs"][host_schema["legacy_dim"] : -host_schema["energy_extension_dim"]],
             host_schema["safe_features"],
         )
         host_extension = host_state["obs"][
-            host_schema["legacy_dim"] :
+            host_schema["legacy_dim"] : -host_schema["energy_extension_dim"]
         ].reshape(environment.num_hosts, 6)
         host_names = [
             feature["name"]
@@ -232,7 +232,7 @@ class SafeObservationSchemaTests(unittest.TestCase):
         )
         self.assertTrue(has_vm)
         vm_schema = environment.get_observation_schema("vm")
-        vm_extension = vm_state["obs"][vm_schema["legacy_dim"] :]
+        vm_extension = vm_state["obs"][vm_schema["legacy_dim"] : -vm_schema["energy_extension_dim"]]
         _assert_extension_in_schema(
             self,
             vm_extension,

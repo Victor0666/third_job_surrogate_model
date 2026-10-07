@@ -748,6 +748,7 @@ def build_train_config(
     require_deadline_cache: bool = True,
     deadline_cache_override: str | Path | None = None,
     deadline_cache_paths: Mapping[str, str] | None = None,
+    safe_rl_energy_reward_scale: float = 0.002,
     safe_rl_lambda_lr: float = 0.02,
     safe_rl_cost_budget: float = 0.02,
     safe_rl_lambda_init: float = 0.5,
@@ -762,6 +763,8 @@ def build_train_config(
     返回：
     - TrainConfig：训练主循环所需的全部配置。
     """
+    if not math.isfinite(safe_rl_energy_reward_scale) or safe_rl_energy_reward_scale <= 0:
+        raise ValueError("safe_rl_energy_reward_scale must be finite and positive")
     if manager_heuristic_llm_only is None:
         manager_heuristic_llm_only = bool(
             safe_rl_heuristic_manager_enabled
@@ -1061,6 +1064,8 @@ def build_train_config(
             "curriculum_enabled": bool(safe_rl_curriculum_enabled),
             "optimizer_seed": int(optimizer_seed),
         }
+        safe_name_payload["energy_reward_scale"] = float(safe_rl_energy_reward_scale)
+        safe_name_payload["energy_observation"] = "energy_relative_v1"
         safe_name_payload["safety_cost_definition"] = "actual_deadline_violation"
         safe_name_payload["shield_semantics"] = "monitor_only"
         safe_name_payload["cost_budget"] = float(safe_rl_cost_budget)
@@ -1091,6 +1096,7 @@ def build_train_config(
             + f":lambda_lr={float(safe_rl_lambda_lr):.17g}"
             + f":cost_budget={float(safe_rl_cost_budget):.17g}"
             + f":lambda_init={float(safe_rl_lambda_init):.17g}"
+            + f":energy_scale={float(safe_rl_energy_reward_scale):.17g}:energy_relative_v1"
             + ":monitor_only:actual_deadline_violation",
         )
     if protocol_context is None:
@@ -1157,7 +1163,7 @@ def build_train_config(
         max_ready_tasks="auto",
         normalize_obs=True,
         workflows_per_episode=50,
-        energy_reward_scale=1e-3,
+        energy_reward_scale=float(safe_rl_energy_reward_scale) if safe_rl_enabled else 1e-3,
         task_baseline_norm=300.0,
         energy_norm_per_mi_ref=20.0,
         alpha_delay_host=0.75,
@@ -1389,7 +1395,7 @@ def build_train_config(
     )
 
 
-def safety_learning_identity(config: SafeRLConfig) -> dict:
+def safety_learning_identity(config: SafeRLConfig, energy_reward_scale: float = 0.002) -> dict:
     """Constraint and observation semantics shared by demonstrations and Qc."""
     keys = (
         "safety_cost_definition", "shield_semantics", "safety_discount",
@@ -1397,6 +1403,8 @@ def safety_learning_identity(config: SafeRLConfig) -> dict:
         "lateness_clip", "fuzzy_energy_uncertainty_weight",
     )
     return {
+        "energy_reward_scale": float(energy_reward_scale),
+        "energy_observation": "energy_relative_v1",
         **{key: getattr(config, key) for key in keys},
         "shield_enabled": config.shield.enabled,
         "state_enabled": config.state.enabled,

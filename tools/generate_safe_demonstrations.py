@@ -71,6 +71,7 @@ def _environment_kwargs(cfg, workflow_seed, resource_seed):
         "manager_alpha_delay": cfg.manager_alpha_delay,
         "manager_delay_mode": cfg.manager_delay_mode,
         "safe_rl_enabled": True,
+        "energy_reward_scale": cfg.energy_reward_scale,
         "safe_rl_process_risk_aggregation": (
             cfg.safe_rl.process_risk_aggregation
         ),
@@ -126,6 +127,7 @@ def main(argv=None):
             "demonstration episodes."
         )
     )
+    parser.add_argument("--safe-rl-energy-reward-scale", type=float, default=0.002)
     parser.add_argument("--manifest", required=True)
     parser.add_argument("--safe-rl-cost-budget", type=float, default=0.02)
     parser.add_argument("--safe-rl-lambda-init", type=float, default=0.5)
@@ -205,6 +207,7 @@ def main(argv=None):
         safe_rl_enabled=True,
         safe_rl_cost_budget=args.safe_rl_cost_budget,
         safe_rl_lambda_init=args.safe_rl_lambda_init,
+        safe_rl_energy_reward_scale=args.safe_rl_energy_reward_scale,
         safe_rl_lambda_lr=args.safe_rl_lambda_lr,
         safe_rl_shield_enabled=True,
         safe_rl_state_enabled=True,
@@ -257,7 +260,7 @@ def main(argv=None):
                 heuristic.heuristic_id
                 for heuristic in env.manager_heuristics
             ),
-            safe_rl_identity=safety_learning_identity(cfg.safe_rl),
+            safe_rl_identity=safety_learning_identity(cfg.safe_rl, cfg.energy_reward_scale),
             manager_heuristic_manifest_sha256=(
                 manager_manifest_sha256
             ),

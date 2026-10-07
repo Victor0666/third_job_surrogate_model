@@ -34,6 +34,7 @@ from hrl_mix.train_config import (
 def main(argv=None):
     """解析命令行参数，并把参数转交给训练主函数"""
     parser = argparse.ArgumentParser(description="Train the HRL Mix model for a scenario/deadline setting.")
+    parser.add_argument("--safe-rl-energy-reward-scale", type=float, default=0.002)
     parser.add_argument(
         "--scenario",
         default=None,
@@ -307,6 +308,7 @@ def main(argv=None):
         safe_rl_dynamic_lambda_enabled=(
             args.safe_rl_dynamic_lambda
         ),
+        safe_rl_energy_reward_scale=args.safe_rl_energy_reward_scale,
         safe_rl_lambda_lr=args.safe_rl_lambda_lr,
         safe_rl_cost_budget=args.safe_rl_cost_budget,
         safe_rl_lambda_init=args.safe_rl_lambda_init,

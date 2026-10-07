@@ -51,6 +51,10 @@ Deadline 逻辑：
 
 import heapq
 import json
+from base.energy_observation import (
+    ENERGY_OBSERVATION_VERSION, ENERGY_DIAGNOSTIC_FIELDS,
+    PLACEMENT_ENERGY_FIELDS, relative_energy, placement_energy_diagnostics,
+)
 import numpy as np
 
 import os
@@ -360,6 +364,7 @@ class HrlHeftEnv(gym.Env):
         fuzzy_resource_seed=None,
         fuzzy_use_deadline_constraint=True,
         safe_rl_enabled=False,
+        energy_reward_scale=1e-3,
         safe_rl_process_risk_aggregation="mean",
         safe_rl_lateness_normalizer=300.0,
         safe_rl_lateness_clip=5.0,
@@ -627,7 +632,9 @@ class HrlHeftEnv(gym.Env):
         )
 
         # 下层智能体的能耗与延迟奖励参数
-        self.energy_reward_scale = 1e-3
+        if not np.isfinite(energy_reward_scale) or energy_reward_scale <= 0:
+            raise ValueError("energy_reward_scale must be finite and positive")
+        self.energy_reward_scale = float(energy_reward_scale)
         self.task_baseline_norm = 300.0
         self.energy_norm_per_mi_ref = 20.0  # 保留但本版 lower reward 不再使用
         self.alpha_delay_host = 0.35
@@ -904,6 +911,7 @@ class HrlHeftEnv(gym.Env):
             if self.safe_rl_state_enabled
             else 0
         )
+        self.host_obs_dim += 2 * self.num_hosts if self.safe_rl_enabled else 0
         self.host_act_dim = self.num_hosts
 
         self.vm_legacy_obs_dim = (
@@ -920,6 +928,7 @@ class HrlHeftEnv(gym.Env):
             if self.safe_rl_state_enabled
             else 0
         )
+        self.vm_obs_dim += self.max_vms_per_host if self.safe_rl_enabled else 0
         self.vm_act_dim = self.max_vms_per_host
 
         self.observation_space = spaces.Dict({
@@ -1166,6 +1175,14 @@ class HrlHeftEnv(gym.Env):
                     else 0
                 )
                 schema_version = SAFE_OBSERVATION_SCHEMA_VERSION
+            if layer_name in ("host", "vm") and self.safe_rl_enabled:
+                schema_version += ":" + ENERGY_OBSERVATION_VERSION
+                value["energy_features"] = (
+                    ["host_relative_min_energy", "host_relative_mean_energy"]
+                    if layer_name == "host" else ["vm_relative_energy"]
+                )
+                value["energy_extension_dim"] = value["repeat_count"] * len(value["energy_features"])
+                value["layout"] += "; appended candidate-relative energy blocks (illegal=1)"
             value.update(
                 {
                     "schema_version": schema_version,
@@ -4302,6 +4319,48 @@ class HrlHeftEnv(gym.Env):
             ),
         }
 
+    def _candidate_energy(self, task_id, context):
+        # Context lives for one placement and is discarded after mutation.
+        if "legal_candidate_energy" not in context:
+            legal = context["vm_masks_global"]["legal_action_mask"]
+            values = {
+                i: float(self.estimate_incremental_energy_score(task_id, vm_id))
+                for i, vm_id in enumerate(self.vm_ids) if legal[i] > 0.5
+            }
+            if not all(np.isfinite(v) for v in values.values()):
+                raise ValueError("Non-finite legal candidate energy")
+            context["legal_candidate_energy"] = values
+        return context["legal_candidate_energy"]
+
+    def _host_energy_observation(self, task_id, context):
+        energies = self._candidate_energy(task_id, context)
+        groups = [[energies[i] for i in self.host_to_vm_indices[h] if i in energies]
+                  for h in self.host_ids]
+        legal = [bool(group) for group in groups]
+        minimum = [min(group) if group else 0 for group in groups]
+        mean = [np.mean(group) if group else 0 for group in groups]
+        return np.column_stack((relative_energy(minimum, legal),
+                                relative_energy(mean, legal))).ravel()
+
+    def _vm_energy_observation(self, task_id, context):
+        energies = self._candidate_energy(task_id, context)
+        indices = self.host_to_vm_indices[self._cur_host_id]
+        values = np.zeros(self.max_vms_per_host)
+        legal = np.zeros(self.max_vms_per_host, dtype=bool)
+        for slot, index in enumerate(indices):
+            if index in energies:
+                values[slot], legal[slot] = energies[index], True
+        return relative_energy(values, legal)
+
+    def get_energy_decision_diagnostics(self):
+        count = getattr(self, "_energy_decision_count", 0)
+        totals = getattr(self, "_energy_decision_totals", {})
+        return {
+            "energy_decision_count": count,
+            **{name: float(totals.get(field, 0.0)) / max(count, 1)
+               for name, field in zip(ENERGY_DIAGNOSTIC_FIELDS, PLACEMENT_ENERGY_FIELDS)},
+        }
+
     def _cross_platform_communication_risk(
         self,
         task_id: int,
@@ -4951,6 +5010,9 @@ class HrlHeftEnv(gym.Env):
                 [obs, host_safety_obs],
                 axis=0,
             ).astype(np.float32)
+        if self.safe_rl_enabled:
+            obs = np.concatenate([obs, self._host_energy_observation(
+                self._cur_tid, self._current_safety_shield_context)]).astype(np.float32)
         if int(obs.size) != int(self.host_obs_dim):
             raise RuntimeError(
                 "Host observation dimension does not match schema"
@@ -5119,6 +5181,9 @@ class HrlHeftEnv(gym.Env):
                 [obs, vm_safety_obs],
                 axis=0,
             ).astype(np.float32)
+        if self.safe_rl_enabled:
+            obs = np.concatenate([obs, self._vm_energy_observation(
+                self._cur_tid, context)]).astype(np.float32)
         if int(obs.size) != int(self.vm_obs_dim):
             raise RuntimeError(
                 "VM observation dimension does not match schema"
@@ -5300,7 +5365,15 @@ class HrlHeftEnv(gym.Env):
             if self.safe_rl_enabled
             else None
         )
+        energy_diagnostics = {}
+        if self.safe_rl_enabled:
+            energy_diagnostics = placement_energy_diagnostics(
+                self._candidate_energy(tid, context), vm_list, vm_global_idx)
         self._assign_task_to_specific_vm(tid, vm_global_idx)
+        if energy_diagnostics:
+            self._energy_decision_count += 1
+            for name, value in energy_diagnostics.items():
+                self._energy_decision_totals[name] = self._energy_decision_totals.get(name, 0.0) + value
         performance_breakdown = (
             self._safe_performance_reward_breakdown(
                 energy_before_action
@@ -5344,6 +5417,7 @@ class HrlHeftEnv(gym.Env):
         info = {
             "invalid": 0,
             "task_id": tid,
+            **energy_diagnostics,
             "host_id": host_id,
             "vm_global_idx": vm_global_idx,
             "start_time": float(start_time),
@@ -5747,6 +5821,8 @@ class HrlHeftEnv(gym.Env):
         # 安全完成事件采用 episode 内集合去重；累计字段只用于诊断，不进入旧
         # reward，也不写入当前 D3QN replay。
         self._safety_accounted_workflow_ids = set()
+        self._energy_decision_count = 0
+        self._energy_decision_totals = {}
         self._safety_cumulative_cost = 0.0
         self._safety_cumulative_transition_count = 0
         self._safety_cumulative_deadline_violation_count = 0

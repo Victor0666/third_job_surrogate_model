@@ -671,6 +671,7 @@ def train(
     source_scenario: str | None = None,
     resource_scale: str | None = None,
     validation_workers: int = 3,
+    safe_rl_energy_reward_scale: float = 0.002,
     safe_rl_lambda_lr: float = 0.02,
     safe_rl_cost_budget: float = 0.02,
     safe_rl_lambda_init: float = 0.5,
@@ -696,6 +697,7 @@ def train(
         safe_rl_dynamic_lambda_enabled=(
             safe_rl_dynamic_lambda_enabled
         ),
+        safe_rl_energy_reward_scale=safe_rl_energy_reward_scale,
         safe_rl_lambda_lr=safe_rl_lambda_lr,
         safe_rl_cost_budget=safe_rl_cost_budget,
         safe_rl_lambda_init=safe_rl_lambda_init,
@@ -918,6 +920,10 @@ def train(
         env.reset() # 初始化环境， 函数为自己创建
 
     if training_resume_payload is not None:
+        saved_config = training_resume_payload["config_snapshot"]["config"]
+        # Historical configs without this field used 1e-3.
+        if float(saved_config.get("energy_reward_scale", 1e-3)) != cfg.energy_reward_scale:
+            raise ValueError("Energy reward scale resume config mismatch")
         stored_safe_rl = training_resume_payload["config_snapshot"]["config"]["safe_rl"]
         current_safe_rl = build_config_snapshot(cfg)["config"]["safe_rl"]
         if any(stored_safe_rl.get(key) != current_safe_rl[key] for key in (
@@ -1039,12 +1045,12 @@ def train(
     )
     host_observation_schema_version = (
         env.get_observation_schema("host")["schema_version"]
-        if cfg.safe_rl.state.enabled
+        if cfg.safe_rl.enabled
         else "legacy_observation"
     )
     vm_observation_schema_version = (
         env.get_observation_schema("vm")["schema_version"]
-        if cfg.safe_rl.state.enabled
+        if cfg.safe_rl.enabled
         else "legacy_observation"
     )
 
@@ -1221,7 +1227,7 @@ def train(
         pretraining_report = pretrain_agents_from_demonstrations(
             agents_by_layer,
             cfg.safe_rl.offline_pretraining,
-            safe_rl_identity=safety_learning_identity(cfg.safe_rl),
+            safe_rl_identity=safety_learning_identity(cfg.safe_rl, cfg.energy_reward_scale),
             **pretraining_identity,
         )
     else:
