@@ -260,7 +260,7 @@ def evaluate_one_seed(
         .get_manager_action_mask()
     )
 
-    m_act = manager_agent.select_action(
+    m_act = 0 if not getattr(manager_agent, "trainable", True) else manager_agent.select_action(
         sH,
         m_mask,
         deterministic=True,
@@ -502,7 +502,7 @@ def evaluate_one_seed(
             .get_manager_action_mask()
         )
 
-        m_act = manager_agent.select_action(
+        m_act = 0 if not getattr(manager_agent, "trainable", True) else manager_agent.select_action(
             sH,
             m_mask,
             deterministic=True,

@@ -748,6 +748,7 @@ def build_train_config(
     require_deadline_cache: bool = True,
     deadline_cache_override: str | Path | None = None,
     deadline_cache_paths: Mapping[str, str] | None = None,
+    output_namespace: str | None = None,
     safe_rl_energy_reward_scale: float = 0.002,
     safe_rl_lambda_lr: float = 0.02,
     safe_rl_cost_budget: float = 0.02,
@@ -1123,6 +1124,13 @@ def build_train_config(
         )
 
     # 训练开始前确保输出目录存在，避免保存模型或写日志时失败。
+    if output_namespace is not None:
+        namespace = Path(output_namespace)
+        if namespace.is_absolute() or ".." in namespace.parts:
+            raise ValueError("output_namespace must be a relative path without traversal")
+        relative = namespace / scenario / ddl_name / run_name
+        save_dir = ROOT_DIR / "checkpoints" / relative
+        log_path = ROOT_DIR / "out" / relative / "train.csv"
     os.makedirs(save_dir, exist_ok=True)
     os.makedirs(log_path.parent, exist_ok=True)
 

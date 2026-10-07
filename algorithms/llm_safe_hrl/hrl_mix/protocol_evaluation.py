@@ -383,6 +383,7 @@ def build_frozen_scenario_env_kwargs(
     scenario: str,
     library_path: str | os.PathLike[str],
     deadline_cache_overrides: Mapping[str, str] | None = None,
+    required_manager_mode: str = "heuristic_selection_mode",
 ) -> dict[str, Any]:
     """Build one real registry-backed test environment from saved config.
 
@@ -488,7 +489,7 @@ def build_frozen_scenario_env_kwargs(
             "mode",
             "checkpoint manager config",
         )
-    ) != "heuristic_selection_mode":
+    ) != required_manager_mode:
         raise ValueError(
             "frozen protocol evaluation requires "
             "heuristic_selection_mode"

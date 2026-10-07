@@ -167,6 +167,8 @@ def _select_manager_training_action(
     safe_rl_enabled,
 ):
     """Manager 保持原职责，仅在安全模式记录受约束 epsilon-greedy 类型。"""
+    if not getattr(agent, "trainable", True):
+        return 0, {"action_source": "fixed_nonlearning"}
     if safe_rl_enabled:
         selection = agent.select_action_with_info(
             state,
@@ -671,6 +673,10 @@ def train(
     source_scenario: str | None = None,
     resource_scale: str | None = None,
     validation_workers: int = 3,
+    environment_class=None,
+    config_builder=None,
+    manager_factory=None,
+    checkpoint_writer=None,
     safe_rl_energy_reward_scale: float = 0.002,
     safe_rl_lambda_lr: float = 0.02,
     safe_rl_cost_budget: float = 0.02,
@@ -687,7 +693,7 @@ def train(
       进程同设备，返回值按 seed 顺序聚合，因此与串行逐位一致。
     """
     # 统一从配置模块生成所有训练参数，避免主循环中散落大量局部超参数
-    cfg = build_train_config(
+    cfg = (config_builder or build_train_config)(
         scenario=scenario,
         ddl=ddl,
         max_episodes=max_episodes,
@@ -820,7 +826,7 @@ def train(
 
     # 构造环境入参。部分 reward 尺度参数不是构造函数参数，
     # 会在环境创建和 reset 之后通过 apply_env_scales() 手动写入
-    EnvCls = CloudWorkflowEnv_VMAgents # 这里只是给环境类起一个局部别名
+    EnvCls = environment_class or CloudWorkflowEnv_VMAgents # 这里只是给环境类起一个局部别名
     env_kwargs = dict(
         dax_paths=cfg.dax_list,
         horizon=cfg.horizon,
@@ -1139,7 +1145,7 @@ def train(
     # Manager 层智能体：在 phase 级别选择调度策略参数 delta。
     sH0 = env.get_manager_state()
     state_dim_mgr = int(sH0.shape[0])
-    manager_agent = D3QNAgent(
+    manager_agent = (manager_factory or D3QNAgent)(
         input_dim=state_dim_mgr,
         output_dim=manager_act_dim,
         lr=cfg.manager_agent.lr,
@@ -2043,7 +2049,7 @@ def train(
                         )
                     )
                     best_manifest = (
-                        save_best_checkpoint_bundle(
+                        (checkpoint_writer or save_best_checkpoint_bundle)(
                             cfg.save_dir,
                             agents=agents_by_layer,
                             lagrange_controller=(
@@ -2843,7 +2849,7 @@ def train(
         m_mask_next = env.get_manager_action_mask()
 
         # 如果某个 phase 没有实际分配任务，可以选择跳过 manager 更新，避免无效样本进入 replay buffer。
-        if not (cfg.skip_manager_update_if_zero_assign and assign_cnt == 0):
+        if getattr(manager_agent, "trainable", True) and not (cfg.skip_manager_update_if_zero_assign and assign_cnt == 0):
             learning_r_manager = (
                 float(
                     pinfo.get(
