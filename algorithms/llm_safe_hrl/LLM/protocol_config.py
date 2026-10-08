@@ -119,7 +119,19 @@ def configure_seevo_protocol(
     llm_root: str | Path,
 ) -> ExperimentRunContext:
     """Materialize one protocol domain and fail before any LLM/API call."""
+    from algorithms.llm_safe_hrl.base.llm_objective import objective_mode
     problem = _mapping(cfg.problem)
+    llm_objective = objective_mode(problem.get("llm_objective", "original"))
+    if llm_objective == "energy_only":
+        if str(getattr(cfg, "protocol", "single")) != "single":
+            raise ValueError("energy_only currently requires protocol single")
+        OmegaConf.update(cfg, "parameter_optimization.llm_objective", llm_objective, force_add=True)
+        # These offline gates/feedback optimize safety; keep them out of energy-only evolution.
+        cfg.parameter_optimization.auto_admission_enabled = False
+        cfg.parameter_optimization.diagnostic_replay_gate.enabled = False
+        cfg.counterfactual_feedback.enabled = False
+        cfg.critical_state_replay.enabled = False
+        cfg.surrogate.enabled = False
     dataset = dict(problem.get("dataset") or {})
     context = resolve_experiment_protocol(
         str(getattr(cfg, "protocol", "single")),
@@ -132,6 +144,7 @@ def configure_seevo_protocol(
     run_name_value = getattr(cfg, "run_name", None)
     run_context = ExperimentRunContext(
         protocol_context=context,
+        llm_objective=llm_objective,
         deadline=deadline,
         execution_id=str(getattr(cfg, "execution_id", "")),
         run_name=(
@@ -234,6 +247,8 @@ def configure_seevo_protocol(
         llm_root / "cfg" / "problem" / "cews_task_constructive_hrl_ss_admission.yaml"
     )
     admission = _mapping(OmegaConf.load(admission_template))
+    if llm_objective == "energy_only":
+        admission["llm_objective"] = llm_objective
     admission = apply_seevo_scenario_config(
         admission,
         primary_scenario,
@@ -322,6 +337,10 @@ def configure_seevo_protocol(
         **run_context.execution_identity(),
         "deadline_cache_paths": dict(deadline_cache_paths),
     }
+    if llm_objective == "energy_only":
+        run_manifest["llm_objective"] = llm_objective
+        manifest["llm_objective"] = llm_objective
+        _write_json_atomic(output_root / "experiment_protocol_manifest.json", manifest)
     for run_manifest_path in run_manifest_paths:
         _write_json_atomic(run_manifest_path, run_manifest)
     return run_context

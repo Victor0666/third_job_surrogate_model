@@ -1012,6 +1012,14 @@ def build_train_config(
             )
         )
 
+    llm_objective = "original"
+    if resolved_manager_manifest is not None:
+        from base.llm_objective import validate_objective_identity
+        library_payload = json.loads(resolved_manager_manifest.read_text(encoding="utf-8"))
+        llm_objective = validate_objective_identity(library_payload)
+        if llm_objective == "energy_only":
+            output_namespace = output_namespace or "main_energy_only"
+
     run_name = legacy_hrl_run_id(
         scenario,
         ddl_name,
@@ -1065,6 +1073,10 @@ def build_train_config(
             "curriculum_enabled": bool(safe_rl_curriculum_enabled),
             "optimizer_seed": int(optimizer_seed),
         }
+        if llm_objective == "energy_only":
+            from base.heuristic_admission import file_sha256
+            safe_name_payload["llm_objective"] = llm_objective
+            safe_name_payload["heuristic_library_sha256"] = file_sha256(resolved_manager_manifest)
         safe_name_payload["energy_reward_scale"] = float(safe_rl_energy_reward_scale)
         safe_name_payload["energy_observation"] = "energy_relative_v1"
         safe_name_payload["safety_cost_definition"] = "actual_deadline_violation"

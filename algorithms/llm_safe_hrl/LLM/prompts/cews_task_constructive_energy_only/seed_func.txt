@@ -1,0 +1,21 @@
+```python
+import numpy as np
+
+PARAMETER_SCHEMA = {
+    "schema_version": 1,
+    "parameters": [
+        {"name": "energy_weight", "initial_value": 1.0, "lower_bound": 0.01, "upper_bound": 4.0,
+         "semantic_description": "Relative incremental energy importance", "parameter_type": "float", "transform": "identity"},
+        {"name": "work_weight", "initial_value": 0.3, "lower_bound": 0.0, "upper_bound": 2.0,
+         "semantic_description": "Remaining-work consolidation proxy", "parameter_type": "float", "transform": "identity"}
+    ]
+}
+
+def get_task_priority_v1(min_exec_time, min_comm_time, min_incremental_energy, slack,
+                         upward_rank, remaining_work, ready_wait_time, uncertainty):
+    energy = np.asarray(min_incremental_energy, dtype=float)
+    work = np.asarray(remaining_work, dtype=float)
+    energy = energy / (1.0 + np.mean(np.abs(energy)))
+    work = work / (1.0 + np.mean(np.abs(work)))
+    return PARAMS["energy_weight"] * energy - PARAMS["work_weight"] * work
+```

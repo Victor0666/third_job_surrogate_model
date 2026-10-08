@@ -533,6 +533,7 @@ def build_heuristic_library_version(
     ]
     result.update(
         {
+            "llm_objective": payload.get("llm_objective", "original"),
             "manifest_path": str(source),
             "manifest_sha256": hashlib.sha256(raw).hexdigest(),
             "manifest_schema_version": payload.get(
@@ -663,6 +664,9 @@ def save_best_checkpoint_bundle(
         ),
         "config_snapshot": dict(config_snapshot),
     }
+    if heuristic_library_version.get("llm_objective") == "energy_only":
+        payload["llm_objective"] = "energy_only"
+        payload["heuristic_library_sha256"] = heuristic_library_version["manifest_sha256"]
     if protocol_identity is not None:
         payload["experiment_protocol"] = protocol_identity
     manifest_path = target_dir / "best_checkpoint_manifest.json"

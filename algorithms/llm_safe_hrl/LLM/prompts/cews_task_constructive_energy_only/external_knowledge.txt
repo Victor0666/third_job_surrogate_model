@@ -1,0 +1,1 @@
+Task ordering changes resource utilization and subsequent energy. Explore energy-per-work, workload and duration interactions, communication efficiency, and waiting/batching proxies. Evaluate every candidate with full scheduling simulation. Only mean fuzzy energy determines ranking; robustness and DDL metrics do not determine selection.

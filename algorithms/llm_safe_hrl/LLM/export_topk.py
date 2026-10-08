@@ -63,6 +63,11 @@ _OPTIMIZATION_METADATA_FIELDS = (
 )
 
 
+from algorithms.llm_safe_hrl.base.llm_objective import (
+    objective_mode, energy_fitness, objective_identity, validate_energy_only_source, ENERGY_POLICY, ENERGY_RANKING_FIELDS,
+)
+
+
 def resolve_topk_paths(
     *,
     project_root: str | Path,
@@ -71,9 +76,11 @@ def resolve_topk_paths(
     execution_id: str,
     run_dir: str | Path | None = None,
     runtime_dir: str | Path | None = None,
+    llm_objective: str = "original",
 ) -> tuple[Path, Path]:
     """Resolve scenario-specific artifact paths without machine constants."""
     root = Path(project_root).expanduser().resolve()
+    objective_mode(llm_objective)
     source = str(source_scenario).strip().upper()
     deadline = resolve_deadline_setting(ddl).code
     execution = validate_execution_identifier(
@@ -90,7 +97,7 @@ def resolve_topk_paths(
         else (
             root
             / "out"
-            / "main_single"
+            / ("main_energy_only" if llm_objective == "energy_only" else "main_single")
             / source
             / deadline
             / execution
@@ -145,6 +152,8 @@ def _finite(metrics: Mapping, name: str) -> float:
 
 def topk_ranking_key(metrics: Mapping) -> tuple:
     """Feasibility first; energy is ranked but is not a hard threshold."""
+    if metrics.get("llm_objective") == "energy_only":
+        return (energy_fitness(metrics), str(metrics["candidate_sha256"]))
     source_hash = str(
         metrics.get("candidate_sha256", "")
     ).strip().lower()
@@ -246,8 +255,11 @@ def _candidate_from_report(
     expected_scenario: str,
     expected_seeds: set[int],
     final_test_seeds: set[int],
+    llm_objective: str = "original",
 ) -> dict:
     metrics = parse_evaluation_report(stdout_path)
+    if objective_mode(metrics.get("llm_objective", "original")) != llm_objective:
+        raise ValueError("candidate llm_objective mismatch")
     if not bool(metrics.get("interface_valid", False)):
         raise ValueError("candidate interface is invalid")
     if not bool(
@@ -309,6 +321,8 @@ def _candidate_from_report(
         raise ValueError("frozen rule hash mismatch")
 
     source_text = source_path.read_text(encoding="utf-8")
+    if llm_objective == "energy_only":
+        validate_energy_only_source(source_text)
     validate_frozen_rule_source(
         source_text,
         require_metadata=True,
@@ -340,6 +354,7 @@ def load_candidate_pool(
     expected_scenario: str,
     expected_seeds: set[int],
     final_test_seeds: set[int],
+    llm_objective: str = "original",
 ) -> tuple[list[dict], list[dict]]:
     """Load successful persisted evaluations and de-duplicate frozen rules."""
     if not runtime_dir.is_dir():
@@ -364,6 +379,7 @@ def load_candidate_pool(
                 expected_scenario=expected_scenario,
                 expected_seeds=expected_seeds,
                 final_test_seeds=final_test_seeds,
+                llm_objective=llm_objective,
             )
         except RuntimeError:
             raise
@@ -403,10 +419,16 @@ def load_candidate_pool(
 def select_topk(
     candidates: list[dict],
     top_k: int,
+    llm_objective: str = "original",
 ) -> list[dict]:
     """Select ranked candidates, preferring unique structures first."""
     if top_k < 1:
         raise ValueError("top_k must be positive")
+    if llm_objective == "energy_only":
+        ranked = sorted(candidates, key=lambda item: item["ranking_key"])
+        if len(ranked) < top_k:
+            raise ValueError(f"only {len(ranked)} valid candidates, need {top_k}")
+        return ranked[:top_k]
     selected = []
     deferred = []
     used_structures = set()
@@ -526,6 +548,8 @@ def _build_record(
         "availability_basis": TOPK_SELECTION_MODE,
         "rejection_reasons": [],
     }
+    if metrics.get("llm_objective") == "energy_only":
+        record.update(objective_identity())
     record["record_sha256"] = record_sha256(record)
     return record
 
@@ -541,8 +565,12 @@ def export_topk_library(
     runtime_dir: str | Path | None = None,
     allow_failed_final_admission: bool = False,
     allow_partial_run: bool = False,
+    llm_objective: str = "original",
 ) -> Path:
     """Create a Top-K library without mutating original LLM artifacts."""
+    objective_mode(llm_objective)
+    if llm_objective == "energy_only" and int(top_k) != 10:
+        raise ValueError("energy_only exports exactly Top-10")
     source = str(source_scenario).strip().upper()
     deadline = resolve_deadline_setting(ddl).code
     execution = validate_execution_identifier(
@@ -556,6 +584,7 @@ def export_topk_library(
         execution_id=execution,
         run_dir=run_dir,
         runtime_dir=runtime_dir,
+        llm_objective=llm_objective,
     )
     run_manifest_path = artifact_root / "run_manifest.json"
     admission_config_path = (
@@ -569,6 +598,8 @@ def export_topk_library(
     run_manifest = json.loads(
         run_manifest_path.read_text(encoding="utf-8")
     )
+    if objective_mode(run_manifest.get("llm_objective", "original")) != llm_objective:
+        raise ValueError("source run llm_objective mismatch")
     protocol = _validate_requested_run(
         run_manifest,
         source_scenario=source,
@@ -607,8 +638,9 @@ def export_topk_library(
         expected_scenario=source,
         expected_seeds=expected_seeds,
         final_test_seeds=final_test_seeds,
+        llm_objective=llm_objective,
     )
-    selected = select_topk(candidates, int(top_k))
+    selected = select_topk(candidates, int(top_k), llm_objective=llm_objective)
 
     report_root_name = f"topk_reports_k{top_k}"
     report_root = artifact_root / report_root_name
@@ -690,6 +722,11 @@ def export_topk_library(
         ),
         "llm_rules": records,
     }
+    if llm_objective == "energy_only":
+        manifest.update(objective_identity())
+        manifest["manifest_version"] = "energy-only-topk.v1"
+        manifest["selection_policy"].update(policy_version=ENERGY_POLICY,
+            ranking_fields=ENERGY_RANKING_FIELDS, unique_structure_first=False)
     audit = {
         "source_scenario": source,
         "ddl": deadline,
@@ -790,6 +827,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "snapshot; the exported provenance records this."
         ),
     )
+    parser.add_argument("--llm-objective", choices=["original", "energy_only"], default="original")
     return parser
 
 
@@ -803,6 +841,7 @@ def main() -> None:
         ddl=args.ddl,
         execution_id=args.execution_id,
         top_k=args.top_k,
+        llm_objective=args.llm_objective,
         project_root=args.project_root,
         run_dir=args.run_dir,
         runtime_dir=args.runtime_dir,

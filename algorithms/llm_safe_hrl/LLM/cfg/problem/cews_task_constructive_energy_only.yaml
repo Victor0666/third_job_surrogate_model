@@ -1,0 +1,11 @@
+# Inherit the original simulator/seed/budget settings; change offline LLM objective only.
+defaults:
+  - cews_task_constructive
+  - _self_
+llm_objective: energy_only
+description: >
+  Rank ready tasks to minimize long-term mean fuzzy energy score only.
+  Safety is handled downstream by Safe-HRL. Do not optimize deadline
+  violation, lateness, safety margin, predicted risk, or deadline feasibility.
+constraints:
+  comparison: energy_only

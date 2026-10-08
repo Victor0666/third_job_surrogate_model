@@ -129,6 +129,7 @@ def main(argv=None):
     )
     parser.add_argument("--safe-rl-energy-reward-scale", type=float, default=0.002)
     parser.add_argument("--manifest", required=True)
+    parser.add_argument("--deadline-cache", action="append", default=None)
     parser.add_argument("--safe-rl-cost-budget", type=float, default=0.02)
     parser.add_argument("--safe-rl-lambda-init", type=float, default=0.5)
     parser.add_argument("--safe-rl-lambda-lr", type=float, default=0.02)
@@ -203,6 +204,7 @@ def main(argv=None):
         protocol="single",
         source_scenario=args.scenario,
         ddl=args.ddl,
+        deadline_cache_paths=args.deadline_cache,
         max_episodes=1,
         safe_rl_enabled=True,
         safe_rl_cost_budget=args.safe_rl_cost_budget,

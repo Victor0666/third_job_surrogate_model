@@ -84,8 +84,11 @@ class ExperimentRunContext:
     execution_id: str
     runtime_output_root: Path
     run_name: str | None = None
+    llm_objective: str = "original"
 
     def __post_init__(self) -> None:
+        from algorithms.llm_safe_hrl.base.llm_objective import objective_mode
+        objective_mode(self.llm_objective)
         validate_execution_identifier(self.execution_id, "execution_id")
         if self.run_name not in (None, ""):
             validate_execution_identifier(str(self.run_name), "run_name")
@@ -106,7 +109,8 @@ class ExperimentRunContext:
     @property
     def artifact_output_root(self) -> Path:
         return (
-            self.protocol_context.artifact_output_root
+            (self.protocol_context.artifact_output_root.parent.parent / "main_energy_only" / self.protocol_context.artifact_output_root.name
+             if self.llm_objective == "energy_only" else self.protocol_context.artifact_output_root)
             / self.deadline.code
             / self.execution_id
         )
@@ -114,7 +118,8 @@ class ExperimentRunContext:
     @property
     def checkpoint_root(self) -> Path:
         return (
-            self.protocol_context.checkpoint_root
+            (self.protocol_context.checkpoint_root.parent.parent / "main_energy_only" / self.protocol_context.checkpoint_root.name
+             if self.llm_objective == "energy_only" else self.protocol_context.checkpoint_root)
             / self.deadline.code
             / self.execution_id
         )
@@ -123,7 +128,8 @@ class ExperimentRunContext:
     def library_path(self) -> Path:
         return (
             self.artifact_output_root
-            / self.protocol_context.library_filename
+            / ("topk_heuristic_library_k10.json" if self.llm_objective == "energy_only"
+               else self.protocol_context.library_filename)
         )
 
     def semantic_identity(self) -> dict[str, Any]:

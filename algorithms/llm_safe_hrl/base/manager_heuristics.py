@@ -53,6 +53,11 @@ from base.topk_schema import (
     TOPK_SELECTION_POLICY_VERSION,
 )
 
+from .llm_objective import (
+    energy_fitness, validate_objective_identity, validate_energy_only_source,
+    ENERGY_POLICY, ENERGY_RANKING_FIELDS,
+)
+
 LEGACY_RULE_WEIGHT_MODE = "legacy_rule_weight_mode"
 HEURISTIC_SELECTION_MODE = "heuristic_selection_mode"
 MANAGER_HEURISTIC_MODES = frozenset(
@@ -611,6 +616,8 @@ def _admission_reasons(
 
 def _topk_selection_key(evaluation: Mapping) -> tuple:
     """Return the deterministic feasibility-first key used by Top-K export."""
+    if evaluation.get("llm_objective") == "energy_only":
+        return (energy_fitness(evaluation), str(evaluation["candidate_sha256"]))
     numeric_fields = (
         "max_deadline_violation_rate_across_seeds",
         "max_fuzzy_lateness",
@@ -1020,6 +1027,8 @@ def _llm_heuristic(
                 raise ValueError(
                     "unsupported_priority_function_name"
                 )
+            if entry.get("llm_objective") == "energy_only":
+                validate_energy_only_source(candidate_path.read_text(encoding="utf-8"))
             function = _load_priority_rule(
                 candidate_path,
                 function_name,
@@ -1096,6 +1105,7 @@ def load_manager_heuristic_library(
         raise ValueError(
             "safe heuristic manifest must be a JSON object"
         )
+    llm_objective = validate_objective_identity(payload)
     selection_mode = str(
         payload.get(
             "selection_mode",
@@ -1183,6 +1193,12 @@ def load_manager_heuristic_library(
     trusted_report_root = str(
         payload.get("trusted_report_root", "")
     ).strip()
+    if llm_objective == "energy_only" and selection_mode != TOPK_SELECTION_MODE:
+        raise ValueError("energy_only requires Top-K selection, not safety admission")
+    for entry in entries:
+        validate_objective_identity(entry, llm_objective)
+        if selection_mode == TOPK_SELECTION_MODE:
+            validate_objective_identity(entry.get("evaluation", {}), llm_objective)
     if selection_mode == SAFE_ADMISSION_MODE:
         manifest_admission_policy = admission_policy_from_config(
             {"admission": payload.get("admission_policy")}
@@ -1196,7 +1212,7 @@ def load_manager_heuristic_library(
             )
         if (
             selection_policy.get("policy_version")
-            != TOPK_SELECTION_POLICY_VERSION
+            != (ENERGY_POLICY if llm_objective == "energy_only" else TOPK_SELECTION_POLICY_VERSION)
         ):
             raise ValueError(
                 "Top-K selection policy version mismatch"
@@ -1209,6 +1225,8 @@ def load_manager_heuristic_library(
             "objective_cv_across_seeds",
             "candidate_sha256",
         ]
+        if llm_objective == "energy_only":
+            expected_ranking_fields = ENERGY_RANKING_FIELDS
         if (
             selection_policy.get("ranking_fields")
             != expected_ranking_fields
@@ -1218,10 +1236,10 @@ def load_manager_heuristic_library(
             )
         if (
             selection_policy.get("unique_structure_first")
-            is not True
+            is not (llm_objective != "energy_only")
         ):
             raise ValueError(
-                "Top-K policy must enable unique_structure_first"
+                "Top-K unique_structure_first does not match objective"
             )
         if selection_policy.get("hard_energy_threshold") is not None:
             raise ValueError(

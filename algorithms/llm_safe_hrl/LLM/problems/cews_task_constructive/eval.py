@@ -63,6 +63,11 @@ DEFAULT_CONFIG_PATH = LLM_ROOT / "cfg" / "problem" / "cews_task_constructive.yam
 LLM_EVOLUTION_FORBIDDEN_SEEDS = frozenset({101, 102, 103}).union(range(201, 231))
 
 
+from algorithms.llm_safe_hrl.base.llm_objective import (
+    objective_mode, energy_fitness, objective_identity, validate_energy_only_source,
+)
+
+
 def _apply_eval_scenario_config(
     config: dict,
     scenario: str,
@@ -591,6 +596,10 @@ def evaluate_candidate(
     只有全部 seed 都满足 DDL 时，聚合结果才标记为 constraint_feasible。
     """
     resolved_candidate = Path(candidate_path).resolve()
+    if objective_mode(config.get("llm_objective", "original")) == "energy_only":
+        if not config.get("fuzzy", {}).get("enabled", False):
+            raise ValueError("energy_only requires fuzzy energy evaluation")
+        validate_energy_only_source(resolved_candidate.read_text(encoding="utf-8"))
     priority_function = load_priority_function(
         resolved_candidate,
         function_name,
@@ -862,6 +871,9 @@ def evaluate_candidate(
             raise ValueError(
                 f"Evaluator produced a non-finite numeric field: {key}."
             )
+    if config.get("llm_objective") == "energy_only":
+        result.update(objective_identity())
+        result["objective"] = energy_fitness(result)
     return result
 
 

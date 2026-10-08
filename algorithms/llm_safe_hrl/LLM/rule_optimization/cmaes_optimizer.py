@@ -38,6 +38,11 @@ class DiagnosticReplayGateConfig:
     delete_traces_after_use: bool = True
 
 
+from algorithms.llm_safe_hrl.base.llm_objective import (
+    objective_mode, energy_fitness,
+)
+
+
 def _finite(value: Any, default: float = float("inf")) -> float:
     try:
         number = float(value)
@@ -50,8 +55,11 @@ def constraint_priority_key(
     metrics: Mapping[str, Any],
     *,
     performance_tolerance: float = 0.0,
+    llm_objective: str | None = None,
 ) -> tuple[float, ...]:
     """Return a strict DDL-first key; no constraint/energy weighted sum is used."""
+    if objective_mode(llm_objective or metrics.get("llm_objective", "original")) == "energy_only":
+        return (energy_fitness(metrics),)
     feasible = bool(metrics.get("constraint_feasible", False))
     violation = _finite(
         metrics.get(
@@ -99,8 +107,11 @@ def rank_fitness(
     results: Sequence[Mapping[str, Any]],
     *,
     performance_tolerance: float = 0.0,
+    llm_objective: str = "original",
 ) -> list[float]:
     """Map lexicographic constraint keys to scalar ranks for CMA-ES tell()."""
+    if objective_mode(llm_objective) == "energy_only":
+        return [energy_fitness(result) for result in results]
     keys = [
         constraint_priority_key(
             result,
@@ -125,6 +136,7 @@ class OptimizerConfig:
     """Central configuration for bounded, staged CMA-ES optimization."""
 
     enabled: bool = False
+    llm_objective: str = "original"
     optimizer_seed: int = 0
     max_parameters: int = 12
     population_size: int = 8
@@ -170,6 +182,7 @@ class OptimizerConfig:
                 **dict(replay_value)
             )
         config = cls(**kwargs)
+        objective_mode(config.llm_objective)
         if config.max_parameters < 1:
             raise ValueError("max_parameters must be positive")
         if config.population_size < 2:
@@ -233,6 +246,7 @@ class OptimizerConfig:
                 else value
             )
             for name, value in self.__dict__.items()
+            if name != "llm_objective" or value != "original"
         }
 
 
@@ -633,6 +647,7 @@ class CMAESOptimizer:
                         key=lambda item: constraint_priority_key(
                             exact_by_index[item],
                             performance_tolerance=self.config.performance_tolerance,
+                            llm_objective=self.config.llm_objective,
                         ),
                     )
                     promising_exact = set(
@@ -682,12 +697,14 @@ class CMAESOptimizer:
             fitness = rank_fitness(
                 metrics,
                 performance_tolerance=self.config.performance_tolerance,
+                llm_objective=self.config.llm_objective,
             )
             strategy.tell(repaired, fitness)
             keys = [
                 constraint_priority_key(
                     item,
                     performance_tolerance=self.config.performance_tolerance,
+                    llm_objective=self.config.llm_objective,
                 )
                 for item in metrics
             ]
@@ -778,6 +795,7 @@ class CMAESOptimizer:
                         constraint_priority_key(
                             result,
                             performance_tolerance=self.config.performance_tolerance,
+                            llm_objective=self.config.llm_objective,
                         )
                     )
                     item["evaluation_source"] = "exact"
@@ -859,6 +877,7 @@ class CMAESOptimizer:
                             constraint_priority_key(
                                 result,
                                 performance_tolerance=self.config.performance_tolerance,
+                                llm_objective=self.config.llm_objective,
                             )
                         ),
                     }
@@ -1060,6 +1079,7 @@ class CMAESOptimizer:
                             constraint_priority_key(
                                 result,
                                 performance_tolerance=self.config.performance_tolerance,
+                                llm_objective=self.config.llm_objective,
                             )
                         ),
                         "seeds": list(diagnostic_seeds),

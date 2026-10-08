@@ -1,0 +1,19 @@
+Compare two {func_name} task-ordering rules for {problem_desc}.
+Contract: {func_desc}
+
+Worse energy performance:
+```python
+{worse_code}
+```
+Better energy performance:
+```python
+{better_code}
+```
+
+Only mean fuzzy energy determines performance. Explain the difference using
+execution/communication efficiency, incremental energy, energy-per-work,
+remaining workload, or waiting/batching effects. Propose a bounded structural
+change rather than manually editing optimized weights; CMA-ES chooses values.
+Do not optimize DDL feasibility, lateness, safety margin, or predicted risk.
+Safety is handled downstream by Safe-HRL. Do not infer causation from one run.
+Return 2-3 concise insights, under 50 words, one per line.

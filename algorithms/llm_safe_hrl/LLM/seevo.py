@@ -77,6 +77,11 @@ RESULT_JSON_PREFIX = "RESULT_JSON="
 LLM_EVOLUTION_FORBIDDEN_SEEDS = frozenset({101, 102, 103}).union(range(201, 231))
 
 
+from algorithms.llm_safe_hrl.base.llm_objective import (
+    objective_mode, objective_identity, validate_energy_only_source,
+)
+
+
 def _config_mapping(value, label: str) -> dict:
     """Return a resolved mapping from an OmegaConf or plain mapping value."""
     if value is None:
@@ -181,6 +186,8 @@ def individual_comparison_key(individual: dict) -> tuple[float, ...]:
         return (2.0, float("inf"), float("inf"), float("inf"))
 
     metrics = individual.get("metrics") or {}
+    if metrics.get("llm_objective") == "energy_only" or individual.get("llm_objective") == "energy_only":
+        return (0.0, objective)
     def finite_or_infinity(value):
         try:
             number = float(value)
@@ -253,6 +260,8 @@ def individual_performance_summary(individual: dict) -> str:
     """为反思 Prompt 生成人类可读的模糊能耗与约束状态摘要。"""
     metrics = individual.get("metrics") or {}
     objective = float(individual["obj"])
+    if (individual.get("metrics") or {}).get("llm_objective") == "energy_only":
+        return f"mean_fuzzy_energy_score={objective:.6f} J"
 
     if "constraint_feasible" not in metrics:
         return f"objective={objective:.4f}"
@@ -318,6 +327,8 @@ def rule_source_for_evolution(individual: dict) -> str:
 
 def parameter_feedback_summary(individual: dict) -> str:
     """Serialize three distinct, compact evidence roles for reflector prompts."""
+    if (individual.get("metrics") or {}).get("llm_objective") == "energy_only":
+        return json.dumps({"llm_objective": "energy_only", "mean_fuzzy_energy_score": float(individual["obj"])})
     diagnostics = individual.get("parameter_diagnostics")
     if not diagnostics:
         return json.dumps(
@@ -447,6 +458,7 @@ class SeEvo:
         输出：
             None。该函数通过设置实例属性完成初始化。
         """
+        self.llm_objective = objective_mode(getattr(cfg.problem, "llm_objective", "original"))
         self.cfg = cfg
         self.root_dir = root_dir
         self.case_num = case_num
@@ -480,6 +492,8 @@ class SeEvo:
                 raw_optimizer_config,
                 resolve=True,
             )
+        if self.llm_objective == "energy_only":
+            raw_optimizer_config = dict(raw_optimizer_config or {}, llm_objective="energy_only")
         self.parameter_optimizer_config = OptimizerConfig.from_mapping(
             raw_optimizer_config
         )
@@ -651,7 +665,8 @@ class SeEvo:
         # Load problem-specific prompt components
         # 加载问题相关的提示词组件
         prompt_path_suffix = "_black_box" if self.problem_type == "black_box" else "" # 如果是黑盒问题，变换加载方式
-        problem_prompt_path = f'{self.prompt_dir}/{self.problem}{prompt_path_suffix}' #设置加载路径
+        prompt_problem = self.problem + ('_energy_only' if self.llm_objective == 'energy_only' else '')
+        problem_prompt_path = f'{self.prompt_dir}/{prompt_problem}{prompt_path_suffix}'
 
         self.seed_func = file_to_string(f'{problem_prompt_path}/seed_func.txt') # 读取初始启发式函数 seed_function
         parameterized_reference_path = (
@@ -699,6 +714,10 @@ class SeEvo:
             f'{common_prompt_dir}/candidate_repair.txt'
         )
         # Format user prompts with problem-specific information
+        if self.llm_objective == "energy_only":
+            self.user_reflector_st_prompt = file_to_string(
+                f'{problem_prompt_path}/user_reflector_st.txt'
+            )
         # 使用问题相关信息格式化用户提示词
         self.user_generator_prompt = file_to_string(f'{common_prompt_dir}/user_generator.txt').format(
             func_name=self.func_name,
@@ -959,6 +978,9 @@ class SeEvo:
         if source is None:
             raise RuleValidationError("candidate response contains no Python rule")
         config = self._optimizer_config()
+        if getattr(self, "llm_objective", "original") == "energy_only":
+            validate_energy_only_source(source)
+            individual["llm_objective"] = "energy_only"
         candidate = parse_rule_candidate(
             source,
             max_parameters=config.max_parameters,
@@ -1384,6 +1406,8 @@ class SeEvo:
                 seed_results,
                 evaluation_seeds,
             )
+            if getattr(self, "llm_objective", "original") == "energy_only":
+                aggregate.update(objective_identity())
             aggregate["seeds"] = [int(seed) for seed in seeds]
             aggregate["scenario_ids"] = scenario_ids
             aggregate["evaluation_context_count"] = len(seed_results)
@@ -3106,6 +3130,8 @@ class SeEvo:
     def _finalize_best_rule_admission(self) -> dict | None:
         """Re-evaluate and register the best frozen rule through existing admission."""
         config = self._optimizer_config()
+        if getattr(self, "llm_objective", "original") == "energy_only":
+            return None
         if not config.auto_admission_enabled:
             return None
         individual = self.elitist
@@ -3717,6 +3743,11 @@ class SeEvo:
             "every changed structure must re-enter CMA-ES, full simulation, and replay.\n"
         )
         
+        if getattr(self, "llm_objective", "original") == "energy_only":
+            performance_context = ("\nEnergy-only comparison: " + individual_performance_summary(worse_ind)
+                                   + " versus " + individual_performance_summary(better_ind)
+                                   + ". Rank only by mean fuzzy energy. Safety is handled downstream by Safe-HRL.\n")
+
         # Create reflection prompt
         # 创建反思提示词
         system = self.system_reflector_prompt
@@ -3798,6 +3829,11 @@ class SeEvo:
             "- Cross-seed statistics are diagnostic only and are not part "
             "of the optimization objective.\n"
         )
+
+        if getattr(self, "llm_objective", "original") == "energy_only":
+            performance_context = ("\nEnergy-only parent/offspring: " + individual_performance_summary(better_ind)
+                                   + " versus " + individual_performance_summary(ind)
+                                   + ". Rank only by mean fuzzy energy.\n")
 
         # Create reflection prompt
         # 创建反思提示词
@@ -4007,6 +4043,8 @@ class SeEvo:
             "decisions, generations, seeds, or scenarios; re-run CMA-ES and full "
             "evaluation plus replay after every change and do not grow complexity without need."
         )
+        if getattr(self, "llm_objective", "original") == "energy_only":
+            combined_reflection = "\n".join(short_term_reflections) + "\nEnergy-only elite evidence: " + json.dumps(diagnostic_feedback)
         user = self.user_reflector_lt_prompt.format(
             problem_desc=self.problem_desc,
             prior_reflection=self.long_term_reflection_str,
