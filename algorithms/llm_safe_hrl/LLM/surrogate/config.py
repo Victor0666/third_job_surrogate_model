@@ -44,6 +44,7 @@ class FailSafeConfig:
 @dataclass(frozen=True)
 class SurrogateConfig:
     enabled: bool = False
+    llm_objective: str = "original"
     random_seed: int = 0
     retrain_every_exact_evaluations: int = 100
     conservative_sigma: float = 1.0
@@ -77,6 +78,8 @@ class SurrogateConfig:
         return config
 
     def validate(self) -> None:
+        if self.llm_objective not in {"original", "energy_only"}:
+            raise ValueError("surrogate.llm_objective must be original or energy_only")
         if (
             isinstance(self.random_seed, bool)
             or not isinstance(self.random_seed, int)

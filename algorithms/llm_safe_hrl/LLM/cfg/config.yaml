@@ -57,7 +57,7 @@ init_pop_size: 20 # initial population size for GA
                   # 遗传算法的初始种群规模
 mutation_rate: 0.5 # mutation rate for GA
                    # 遗传算法的变异率
-timeout: 100 # timeout for evaluation of a single heuristic
+timeout: 300 # timeout for evaluation of a single heuristic
              # 单个启发式规则评估的超时时间
 diversify_init_pop: True # whether to diversify the initial population
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import deque
+from dataclasses import replace
 import hashlib
 import math
 import os
@@ -17,7 +18,9 @@ from .features import extract_parameter_features
 from .models import ExtraTreesMetricModel, SurrogatePrediction
 
 
-def _label(metrics: Mapping[str, Any]) -> dict[str, Any]:
+def _label(metrics: Mapping[str, Any], llm_objective: str = "original") -> dict[str, Any]:
+    if llm_objective == "energy_only":
+        return {"energy": float(metrics["fuzzy_total_energy_score"])}
     violation = metrics.get(
         "deadline_violation_count",
         metrics.get(
@@ -48,6 +51,8 @@ class SurrogateManager:
         artifact_root: str | os.PathLike[str] | None = None,
     ) -> None:
         self.config = config
+        if config.llm_objective == "energy_only":
+            context = replace(context, schema_version=context.schema_version + "_energy_only_v1")
         self.context = context
         root = Path(artifact_root or ".")
         dataset_path = Path(config.dataset_path)
@@ -60,10 +65,12 @@ class SurrogateManager:
         self.structure_model = ExtraTreesMetricModel(
             random_seed=config.random_seed,
             conservative_sigma=config.conservative_sigma,
+            llm_objective=config.llm_objective,
         )
         self.parameter_model = ExtraTreesMetricModel(
             random_seed=config.random_seed + 1009,
             conservative_sigma=config.conservative_sigma,
+            llm_objective=config.llm_objective,
         )
         self._lock = threading.RLock()
         self._new_exact = 0
@@ -91,13 +98,17 @@ class SurrogateManager:
     def gate_healthy(self, kind: str) -> bool:
         return self.healthy and not self.gate_disabled_reasons[kind]
 
-    @staticmethod
-    def _priority_key(metrics: Mapping[str, Any]) -> tuple[float, ...]:
+    def _priority_key(self, metrics: Mapping[str, Any]) -> tuple[float, ...]:
         try:
             from rule_optimization.cmaes_optimizer import constraint_priority_key
         except ImportError:  # pragma: no cover
             from ..rule_optimization.cmaes_optimizer import constraint_priority_key
-        return constraint_priority_key(metrics)
+        return constraint_priority_key(metrics, llm_objective=self.config.llm_objective)
+
+    def _features(self, candidate, parameters, metrics):
+        return extract_parameter_features(
+            candidate, parameters, metrics, llm_objective=self.config.llm_objective,
+        )
 
     def _model_ready(self, kind: str) -> bool:
         model = self.structure_model if kind == "structure" else self.parameter_model
@@ -119,7 +130,8 @@ class SurrogateManager:
         try:
             with self.checkpoint_path.open("rb") as handle:
                 payload = pickle.load(handle)  # noqa: S301 - trusted local artifact
-            if payload.get("context_hash") != self.context.context_hash:
+            if (payload.get("context_hash") != self.context.context_hash
+                    or payload.get("llm_objective", "original") != self.config.llm_objective):
                 self.disabled_reason = "checkpoint_context_mismatch"
                 return
             self.structure_model = payload["structure_model"]
@@ -134,6 +146,7 @@ class SurrogateManager:
         self.checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
         temporary = self.checkpoint_path.with_suffix(self.checkpoint_path.suffix + ".tmp")
         payload = {
+            "llm_objective": self.config.llm_objective,
             "context_hash": self.context.context_hash,
             "context": self.context.as_dict(),
             "structure_model": self.structure_model,
@@ -188,7 +201,7 @@ class SurrogateManager:
 
     def _record(self, kind: str, features, metrics, metadata) -> None:
         with self._lock:
-            self.dataset.add_exact(kind, features, _label(metrics), metadata)
+            self.dataset.add_exact(kind, features, _label(metrics, self.config.llm_objective), metadata)
             self._new_exact += 1
         self.retrain()
 
@@ -202,16 +215,17 @@ class SurrogateManager:
     ) -> None:
         if not self.enabled:
             return
-        features = extract_parameter_features(candidate, parameters, quick_metrics)
-        final_label = _label(final_metrics)
-        quick_label = _label(quick_metrics)
+        features = self._features(candidate, parameters, quick_metrics)
+        final_label = _label(final_metrics, self.config.llm_objective)
+        quick_label = _label(quick_metrics, self.config.llm_objective)
         final_label["energy_improvement"] = (
             quick_label["energy"] - final_label["energy"]
         )
-        final_label["feasibility_improved"] = (
-            not quick_label["constraint_feasible"]
-            and final_label["constraint_feasible"]
-        )
+        if self.config.llm_objective != "energy_only":
+            final_label["feasibility_improved"] = (
+                not quick_label["constraint_feasible"]
+                and final_label["constraint_feasible"]
+            )
         with self._lock:
             self.dataset.add_exact(
                 "structure",
@@ -255,7 +269,7 @@ class SurrogateManager:
     ) -> None:
         if not self.enabled:
             return
-        features = extract_parameter_features(candidate, parameters, quick_metrics)
+        features = self._features(candidate, parameters, quick_metrics)
         self._record("parameter", features, refine_metrics, metadata)
 
     def _deterministic_index(self, identities: Sequence[str], salt: str) -> int:
@@ -340,15 +354,15 @@ class SurrogateManager:
             )
         return selected, reasons
 
-    @staticmethod
-    def _validate_predictions(predictions: Sequence[SurrogatePrediction]) -> None:
+    def _validate_predictions(self, predictions: Sequence[SurrogatePrediction]) -> None:
         for prediction in predictions:
             values = [
                 prediction.total_uncertainty,
-                prediction.metrics.get("deadline_violation_rate"),
-                prediction.metrics.get("total_lateness"),
                 prediction.metrics.get("fuzzy_total_energy_score"),
             ]
+            if self.config.llm_objective != "energy_only":
+                values.extend([prediction.metrics.get("deadline_violation_rate"),
+                               prediction.metrics.get("total_lateness")])
             if not all(math.isfinite(float(value)) for value in values):
                 raise ValueError("surrogate returned a non-finite prediction")
 
@@ -378,8 +392,9 @@ class SurrogateManager:
         try:
             predictions = [
                 self.structure_model.predict(
-                    extract_parameter_features(candidate, parameters, metrics),
-                    robustness=float(metrics.get("objective_std_across_seeds", 0.0)),
+                    self._features(candidate, parameters, metrics),
+                    robustness=(0.0 if self.config.llm_objective == "energy_only"
+                                else float(metrics.get("objective_std_across_seeds", 0.0))),
                 )
                 for candidate, parameters, metrics in zip(candidates, parameter_maps, quick_metrics)
             ]
@@ -446,8 +461,9 @@ class SurrogateManager:
         try:
             predictions = [
                 self.parameter_model.predict(
-                    extract_parameter_features(candidate, parameters, metrics),
-                    robustness=float(metrics.get("objective_std_across_seeds", 0.0)),
+                    self._features(candidate, parameters, metrics),
+                    robustness=(0.0 if self.config.llm_objective == "energy_only"
+                                else float(metrics.get("objective_std_across_seeds", 0.0))),
                 )
                 for parameters, metrics in zip(parameter_maps, quick_metrics)
             ]
@@ -537,6 +553,7 @@ class SurrogateManager:
             }
         return {
             "enabled": self.enabled,
+            "llm_objective": self.config.llm_objective,
             "healthy": self.healthy,
             "disabled_reason": self.disabled_reason,
             "exact_structure_labels": self.dataset.count("structure"),

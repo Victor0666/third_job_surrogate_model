@@ -170,13 +170,15 @@ def test_feedback_excludes_safety_evidence():
     assert json.loads(parameter_feedback_summary(ind)) == dict(llm_objective='energy_only', mean_fuzzy_energy_score=300.)
 
 
-def test_config_protocol_budget_and_isolation(tmp_path):
+@pytest.mark.parametrize('surrogate_enabled', [True, False])
+def test_config_protocol_budget_and_isolation(tmp_path, surrogate_enabled):
     with initialize_config_dir(version_base=None, config_dir=str(LLM_ROOT / 'cfg')):
         cfg = compose(config_name='config', overrides=['problem=cews_task_constructive_energy_only'])
         original = compose(config_name='config')
     for key in ('max_fe', 'pop_size', 'init_pop_size', 'candidate_generation'):
         assert cfg[key] == original[key]
     OmegaConf.update(cfg, 'deadline_cache_paths', caches(), force_add=True)
+    cfg.surrogate.enabled = surrogate_enabled
     cfg.execution_id = 'energy_test'
     cfg.experiment_key = 'SS_T'
     cfg.runtime_output_root = str(tmp_path / 'runtime')
@@ -197,7 +199,10 @@ def test_config_protocol_budget_and_isolation(tmp_path):
     assert manifest['llm_objective'] == 'energy_only'
     assert cfg.parameter_optimization.llm_objective == 'energy_only'
     assert not cfg.counterfactual_feedback.enabled and not cfg.critical_state_replay.enabled
-    assert not cfg.surrogate.enabled and not cfg.parameter_optimization.auto_admission_enabled
+    assert cfg.timeout == 300
+    assert cfg.surrogate.enabled == surrogate_enabled
+    assert cfg.surrogate.llm_objective == 'energy_only'
+    assert not cfg.parameter_optimization.auto_admission_enabled
     assert not cfg.parameter_optimization.diagnostic_replay_gate.enabled
 
 

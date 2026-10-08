@@ -13,17 +13,11 @@ def init_client(cfg):
     global url
     global data
     if cfg.model.startswith("gpt"): #判断是什么大模型
-        import openai
         from openai import OpenAI  # 导入 OpenAI SDK
         # 检查环境变量中有没有 API Key
         assert os.getenv('OPENAI_API_KEY') is not None, "Please set the environment variable OPENAI_API_KEY"
-        # client = OpenAI(api_key=)
+        # OpenAI SDK also reads OPENAI_BASE_URL for compatible gateways.
         client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
-        openai.api_base = "https://api.chatanywhere.tech"
-        # client = OpenAI(
-        #         api_key=os.getenv('OPENAI_API_KEY'),
-        #         base_url="https://api.chatanywhere.tech/v1"
-        #     )
         
     elif cfg.model.startswith("GLM"):
         from zhipuai import ZhipuAI
@@ -147,7 +141,7 @@ def multi_chat_completion(messages_list: list[list[dict]], n, model, temperature
     if len(messages_list) > 1:
         assert n == 1, "Currently, only n=1 is supported for multi-chat completion."
     
-    if not model.startswith(("gpt")):
+    if not model.startswith("gpt") or model.startswith("gpt-6.1-sol"):
         # Transform messages if n > 1
         # 当 n > 1 时转换消息列表
         messages_list *= n
@@ -168,9 +162,17 @@ def chat_completion(n: int, messages: list[dict], model: str, temperature: float
     Generate n responses using OpenAI Chat Completions API
     使用 OpenAI Chat Completions API 生成 n 个响应
     """
+    if model.startswith("gpt-6.1-sol") and n > 1:
+        return [choice for _ in range(n)
+                for choice in chat_completion(1, messages, model, temperature)]
+    response_cur = None
     for attempt in range(1000):
         try:
-            if "gpt" in model:
+            if model.startswith("gpt-6.1-sol"):
+                response_cur = client.chat.completions.create(
+                    model=model, messages=messages, reasoning_effort="medium", n=1,
+                )
+            elif "gpt" in model:
                 response_cur = client.chat.completions.create(model=model, messages=messages, temperature = min(temperature, 1.), n=n)
             else:
                 assert n == 1

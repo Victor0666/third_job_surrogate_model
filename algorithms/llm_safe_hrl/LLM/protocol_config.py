@@ -131,7 +131,7 @@ def configure_seevo_protocol(
         cfg.parameter_optimization.diagnostic_replay_gate.enabled = False
         cfg.counterfactual_feedback.enabled = False
         cfg.critical_state_replay.enabled = False
-        cfg.surrogate.enabled = False
+        OmegaConf.update(cfg, "surrogate.llm_objective", llm_objective, force_add=True)
     dataset = dict(problem.get("dataset") or {})
     context = resolve_experiment_protocol(
         str(getattr(cfg, "protocol", "single")),

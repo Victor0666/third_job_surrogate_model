@@ -24,11 +24,18 @@ Prompt 鼓励不同节能机制；不保证 LLM 一定产出 10 种不同语义�
 seed 的仿真，得到 finite energy。导出/加载仍检查文件、报告、配置、规则元数据、
 seed 和 protocol 的来源/一致性。非零违反率或 lateness 不拒绝候选。
 
-本模式不执行最终 safety admission，也关闭离线安全 surrogate gate、counterfactual
-feedback、critical-state replay 和 CMA 诊断 replay gate。参数诊断仍可保存，但
+本模式不执行最终 safety admission，也关闭 counterfactual feedback、critical-state
+replay 和 CMA 诊断 replay gate。保留 surrogate 加速，默认启用；可显式设置
+`surrogate.enabled=false` 关闭。Energy-only 的结构/参数代理只训练能耗回归器，
+quick 特征中的 feasibility/violation/lateness/跨 seed 方差置零。筛选、验证召回率
+和审计只按能耗判断，探索只使用能耗预测不确定性；仍保留随机探索、异常时全量
+真实评估回退、best/elite 和最终验证的真实复核。代理数据/模型与原模式隔离。
+参数诊断仍可保存，但
 LLM 的性能反馈只包含 mean fuzzy energy，避免安全指标或建议重新进入反思 Prompt。
 不新增 LLM 请求；generation/population/repair budget 与原配置一致。
-关闭 surrogate 会增加真实仿真量，比较运行时间时必须说明这一点。
+默认单次评价子进程超时为 300 秒（`timeout=300`）。代理需要先积累真实标签并
+通过验证：默认至少 300 个真实标签，结构至少 20 个、参数至少 12 个；冷启动
+阶段不会立即加速。代理不改变 LLM 请求预算，实际节省时间取决于模型质量。
 
 ## 生成与导出：SS_T 示例
 

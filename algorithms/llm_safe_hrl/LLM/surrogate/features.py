@@ -123,6 +123,8 @@ def extract_parameter_features(
     candidate: RuleCandidate,
     parameters: Mapping[str, float],
     quick_metrics: Mapping[str, Any],
+    *,
+    llm_objective: str = "original",
 ) -> np.ndarray:
     schema = candidate.parameter_schema
     if schema is None:
@@ -152,6 +154,9 @@ def extract_parameter_features(
         ],
         dtype=np.float64,
     )
+    if llm_objective == "energy_only":
+        # Preserve vector shape; safety/seed-variance diagnostics are not inputs.
+        quick[[0, 1, 2, 4]] = 0.0
     result = np.concatenate((extract_structure_features(candidate), normalized, present, quick))
     if result.shape != (len(PARAMETER_FEATURE_NAMES),) or not np.isfinite(result).all():
         raise ValueError("parameter surrogate features are not finite and fixed-size")

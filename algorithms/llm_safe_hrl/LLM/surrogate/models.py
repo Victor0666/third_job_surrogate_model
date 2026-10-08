@@ -20,17 +20,22 @@ class SurrogatePrediction:
 
 
 class ExtraTreesMetricModel:
-    """DDL-first ranking model with separate constraint/energy regressors."""
+    """Metric regressors; energy-only mode trains and ranks only energy."""
 
     TARGETS = ("violation", "lateness", "energy")
+    llm_objective = "original"  # Also supports checkpoints saved before this field existed.
 
-    def __init__(self, *, random_seed: int = 0, conservative_sigma: float = 1.0):
+    def __init__(self, *, random_seed: int = 0, conservative_sigma: float = 1.0,
+                 llm_objective: str = "original"):
+        self.llm_objective = llm_objective
+        if llm_objective == "energy_only":
+            self.TARGETS = ("energy",)
         self.random_seed = int(random_seed)
         self.conservative_sigma = float(conservative_sigma)
         self.regressors: dict[str, Any] = {}
         self.residual_scale: dict[str, float] = {}
         self.validation_metrics: dict[str, float] = {}
-        self.mode = "ranking_only"
+        self.mode = "energy_only" if llm_objective == "energy_only" else "ranking_only"
         self.healthy = False
         self.failure_reason = "not_trained"
 
@@ -109,11 +114,14 @@ class ExtraTreesMetricModel:
                     )
                 )
                 predicted[target] = max(0.0, value) if target != "energy" else value
-            predicted["constraint_feasible"] = bool(predicted["violation"] <= 0.0)
+            if self.llm_objective != "energy_only":
+                predicted["constraint_feasible"] = bool(predicted["violation"] <= 0.0)
             conservative_rows.append(predicted)
         actual_validation = [labels[index] for index in validation_indices]
 
         def priority(row):
+            if self.llm_objective == "energy_only":
+                return (float(row["energy"]),)
             violation = max(0.0, float(row["violation"]))
             ddl_violated = violation > 0.0
             return (
@@ -160,9 +168,17 @@ class ExtraTreesMetricModel:
             predictions[target] = float(np.mean(values))
             uncertainties[target] = float(math.hypot(np.std(values), self.residual_scale[target]))
         sigma = self.conservative_sigma
+        energy = predictions["energy"] + sigma * uncertainties["energy"]
+        if self.llm_objective == "energy_only":
+            return SurrogatePrediction({
+                "llm_objective": "energy_only",
+                "objective": energy,
+                "fuzzy_total_energy_score": energy,
+                "evaluation_source": "surrogate_conservative",
+                "per_seed_metrics": [],
+            }, uncertainties)
         violation = max(0.0, predictions["violation"] + sigma * uncertainties["violation"])
         lateness = max(0.0, predictions["lateness"] + sigma * uncertainties["lateness"])
-        energy = predictions["energy"] + sigma * uncertainties["energy"]
         metrics = {
             "constraint_feasible": bool(violation <= 0.0),
             "deadline_violation_rate": violation,
