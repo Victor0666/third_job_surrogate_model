@@ -106,6 +106,11 @@ def _append_seed_result(
     2. CSV:
        Core metrics for convenient real-time inspection.
     """
+    # The entry point has already checked the destination is empty before
+    # evaluation. Per-seed appends use that same directory; they do not choose
+    # or reset an output destination. Its guard at run_frozen_protocol_evaluation
+    # remains intact, as does the fixed_fcfs directory isolation.
+
     output_dir.mkdir(
         parents=True,
         exist_ok=True,
@@ -1037,6 +1042,7 @@ def _agent_read_only_fingerprint(
             )
         ),
         tuple(versions),
+        float(getattr(agent, "lagrange_multiplier", 0.0)),
     )
 
 
@@ -1211,6 +1217,7 @@ def evaluate_frozen_protocol_scenarios(
 def _resolve_checkpoint_path(
     context: ExperimentProtocolContext,
     checkpoint_manifest: str | os.PathLike[str] | None,
+    *, allow_external: bool = False,
 ) -> Path:
     root = (
         context
@@ -1247,6 +1254,9 @@ def _resolve_checkpoint_path(
             f"best checkpoint manifest not found: {source}"
         )
 
+    if allow_external:
+        return source
+
     try:
         source.relative_to(
             root
@@ -1271,8 +1281,17 @@ def run_frozen_protocol_evaluation(
     test_seeds: Sequence[int] = DEFAULT_FINAL_TEST_SEEDS,
     device: str = "cpu",
     deadline_cache_overrides: Mapping[str, str] | None = None,
+    manager_policy: str = "learned",
+    output_directory: str | os.PathLike[str] | None = None,
+    allow_external_checkpoint: bool = False,
 ) -> str:
     """Load one frozen protocol bundle and run read-only evaluation."""
+    if manager_policy not in ("learned", "fixed_fcfs"):
+        raise ValueError("manager_policy must be learned or fixed_fcfs")
+    env_cls = CloudWorkflowEnv_VMAgents
+    if manager_policy == "fixed_fcfs":
+        from hrl_mix.frozen_manager_ablation import FixedFCFSEvaluationEnv
+        env_cls = FixedFCFSEvaluationEnv
 
     if (
         deadline_cache_overrides
@@ -1310,6 +1329,7 @@ def run_frozen_protocol_evaluation(
     source = _resolve_checkpoint_path(
         context,
         checkpoint_manifest,
+        allow_external=allow_external_checkpoint,
     )
 
     manifest = read_best_checkpoint_manifest(
@@ -1404,6 +1424,9 @@ def run_frozen_protocol_evaluation(
             "checkpoint replay metadata or layer paths are invalid"
         )
 
+    checkpoint_hashes = {layer: _sha256_file(path) for layer, path in checkpoints.items()}
+    source_hash = _sha256_file(source)
+
     agents = {
         layer: _load_frozen_agent(
             checkpoints[layer],
@@ -1431,6 +1454,13 @@ def run_frozen_protocol_evaluation(
         / source.parent.name
     ).resolve()
 
+    if manager_policy != "learned":
+        output_dir = output_dir / "fixed_fcfs"
+    if output_directory is not None:
+        output_dir = Path(output_directory).expanduser().resolve()
+        if output_dir.exists() and any(output_dir.iterdir()):
+            raise ValueError("--output-dir must be empty to avoid overwriting results")
+
     output_dir.mkdir(
         parents=True,
         exist_ok=True,
@@ -1451,6 +1481,7 @@ def run_frozen_protocol_evaluation(
         # IMPORTANT:
         # Without this line seed_result_callback is never enabled.
         progress_output_dir=output_dir,
+        env_cls=env_cls,
     )
 
     # ------------------------------------------------------------
@@ -1484,7 +1515,13 @@ def run_frozen_protocol_evaluation(
             encoding="utf-8",
         )
 
+    if source_hash != _sha256_file(source) or checkpoint_hashes != {
+        layer: _sha256_file(path) for layer, path in checkpoints.items()
+    }:
+        raise RuntimeError("Checkpoint files changed during evaluation; use a frozen copy")
     output_manifest = {
+        "manager_policy": manager_policy,
+        "agent_checkpoint_sha256": checkpoint_hashes,
         "manifest_version": (
             FROZEN_EVALUATION_MANIFEST_VERSION
         ),
@@ -1653,6 +1690,11 @@ def main(
         default="cpu",
     )
 
+    parser.add_argument("--manager-policy", choices=("learned", "fixed_fcfs"), default="learned")
+    parser.add_argument("--output-dir", default=None)
+    parser.add_argument("--allow-external-checkpoint", action="store_true",
+                        help="Allow a checkpoint outside this checkout; identity checks still apply.")
+
     args = parser.parse_args(
         argv
     )
@@ -1700,6 +1742,9 @@ def main(
         ),
         test_seeds=args.test_seeds,
         device=args.device,
+        manager_policy=args.manager_policy,
+        output_directory=args.output_dir,
+        allow_external_checkpoint=args.allow_external_checkpoint,
         deadline_cache_overrides=(
             deadline_cache_overrides
         ),
