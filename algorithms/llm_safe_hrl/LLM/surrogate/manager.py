@@ -19,8 +19,13 @@ from .models import ExtraTreesMetricModel, SurrogatePrediction
 
 
 def _label(metrics: Mapping[str, Any], llm_objective: str = "original") -> dict[str, Any]:
+    if metrics.get("evaluation_error"):
+        raise ValueError("failed evaluations cannot train a surrogate")
+    energy = float(metrics.get("fuzzy_total_energy_score", metrics.get("objective", metrics.get("energy", 1e300))))
+    if not math.isfinite(energy) or energy < 0 or energy >= 1e300:
+        raise ValueError("surrogate requires a finite, successful energy measurement")
     if llm_objective == "energy_only":
-        return {"energy": float(metrics["fuzzy_total_energy_score"])}
+        return {"energy": energy}
     violation = metrics.get(
         "deadline_violation_count",
         metrics.get(
@@ -269,6 +274,7 @@ class SurrogateManager:
     ) -> None:
         if not self.enabled:
             return
+        _label(quick_metrics, self.config.llm_objective)
         features = self._features(candidate, parameters, quick_metrics)
         self._record("parameter", features, refine_metrics, metadata)
 

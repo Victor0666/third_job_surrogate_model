@@ -6,18 +6,38 @@ import re
 import inspect
 import ast
 import textwrap
+import threading
+import math
+
+_api_workers = 4
+_api_attempts = 3
+_api_timeout = 180.0
+_api_slots = threading.BoundedSemaphore(_api_workers)
+
+
+class LLMRequestError(RuntimeError):
+    """A temporary request failure after bounded retries."""
 
 
 def init_client(cfg):
     global client
     global url
     global data
+    global _api_workers, _api_attempts, _api_timeout, _api_slots
+    options = getattr(cfg, "llm_api", {})
+    _api_workers = int(options.get("max_parallel_requests", 4))
+    _api_attempts = int(options.get("max_attempts", 3))
+    _api_timeout = float(options.get("timeout", 180))
+    if _api_workers < 1 or _api_attempts < 1 or not math.isfinite(_api_timeout) or _api_timeout <= 0:
+        raise ValueError("llm_api limits must be positive and finite")
+    _api_slots = threading.BoundedSemaphore(_api_workers)
+    client_options = dict(timeout=_api_timeout, max_retries=0)
     if cfg.model.startswith("gpt"): #判断是什么大模型
         from openai import OpenAI  # 导入 OpenAI SDK
         # 检查环境变量中有没有 API Key
         assert os.getenv('OPENAI_API_KEY') is not None, "Please set the environment variable OPENAI_API_KEY"
         # OpenAI SDK also reads OPENAI_BASE_URL for compatible gateways.
-        client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
+        client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'), **client_options)
         
     elif cfg.model.startswith("GLM"):
         from zhipuai import ZhipuAI
@@ -31,7 +51,7 @@ def init_client(cfg):
             "Please set the environment variable MOONSHOT_API_KEY"
         client = OpenAI(
             api_key=os.getenv('MOONSHOT_API_KEY'),
-            base_url="https://api.moonshot.cn/v1"
+            base_url="https://api.moonshot.cn/v1", **client_options
         )
 
     elif cfg.model.startswith("qwen"):
@@ -40,7 +60,7 @@ def init_client(cfg):
             "Please set the environment variable QWEN_API_KEY"
         client = OpenAI(
             api_key=os.getenv('QWEN_API_KEY'), 
-            base_url="https://dashscope.aliyuncs.com/compatible-mode/v1"
+            base_url="https://dashscope.aliyuncs.com/compatible-mode/v1", **client_options
         )
 
     else:
@@ -48,7 +68,11 @@ def init_client(cfg):
         # Default: use local or custom OpenAI-compatible API
         # 默认：使用本地或自定义的 OpenAI 兼容 API
         base_url = os.getenv('CUSTOM_API_BASE_URL', 'http://localhost:8000/v1/')
-        client = OpenAI(api_key="EMPTY", base_url=base_url)
+        client = OpenAI(api_key="EMPTY", base_url=base_url, **client_options)
+
+    if cfg.model.startswith("gpt-6.1-sol"):
+        if "reasoning_effort" not in inspect.signature(client.chat.completions.create).parameters:
+            raise RuntimeError("OpenAI SDK lacks reasoning_effort; run python -m pip install --upgrade openai")
         
 
 def file_to_string(filename: str, errors: str = "strict") -> str:
@@ -131,10 +155,11 @@ def extract_description(response: str) -> tuple[str, str]:
     return desc_string
 
 
-def multi_chat_completion(messages_list: list[list[dict]], n, model, temperature):
+def multi_chat_completion(messages_list: list[list[dict]], n, model, temperature, *, allow_partial=False):
     # If messages_list is not a list of list (i.e., only one conversation), convert it to a list of list
     # 如果 messages_list 不是列表的列表（即只有一段对话），则将其转换为列表的列表
-    assert isinstance(messages_list, list), "messages_list should be a list."
+    if not isinstance(messages_list, list) or not messages_list or n < 1:
+        raise ValueError("messages_list must be non-empty and n must be positive")
     if not isinstance(messages_list[0], list):
         messages_list = [messages_list]
     
@@ -144,17 +169,32 @@ def multi_chat_completion(messages_list: list[list[dict]], n, model, temperature
     if not model.startswith("gpt") or model.startswith("gpt-6.1-sol"):
         # Transform messages if n > 1
         # 当 n > 1 时转换消息列表
-        messages_list *= n
+        messages_list = messages_list * n
         n = 1
 
-    with concurrent.futures.ThreadPoolExecutor() as executor:
-        args = [(n, messages, model, temperature) for messages in messages_list]
-        choices = executor.map(lambda p: chat_completion(*p), args)
-
-    contents: list[str] = []
-    for choice in choices:
-        for c in choice:
-            contents.append(c.message.content)       
+    started = time.perf_counter()
+    contents = [""] * (len(messages_list) * n)
+    failed = 0
+    with concurrent.futures.ThreadPoolExecutor(max_workers=_api_workers) as executor:
+        futures = {
+            executor.submit(chat_completion, n, messages, model, temperature): index
+            for index, messages in enumerate(messages_list)
+        }
+        for future in concurrent.futures.as_completed(futures):
+            index = futures[future]
+            try:
+                choices = future.result()
+            except LLMRequestError as exc:
+                if not allow_partial:
+                    raise
+                failed += 1
+                logging.warning("LLM candidate request %d failed: %s", index, exc)
+                continue
+            contents[index * n:(index + 1) * n] = [c.message.content for c in choices]
+    logging.info("[llm batch] requests=%d failed=%d workers=%d wall_seconds=%.3f",
+                 len(messages_list), failed, _api_workers, time.perf_counter() - started)
+    if failed == len(messages_list):
+        raise LLMRequestError("Every LLM request in this batch failed")
     return contents
 
 def chat_completion(n: int, messages: list[dict], model: str, temperature: float) -> list[dict]:
@@ -165,30 +205,42 @@ def chat_completion(n: int, messages: list[dict], model: str, temperature: float
     if model.startswith("gpt-6.1-sol") and n > 1:
         return [choice for _ in range(n)
                 for choice in chat_completion(1, messages, model, temperature)]
-    response_cur = None
-    for attempt in range(1000):
+    last_error = None
+    for attempt in range(_api_attempts):
         try:
+            kwargs = dict(model=model, messages=messages)
             if model.startswith("gpt-6.1-sol"):
-                response_cur = client.chat.completions.create(
-                    model=model, messages=messages, reasoning_effort="medium", n=1,
-                )
+                kwargs.update(reasoning_effort="medium", n=1)
             elif "gpt" in model:
-                response_cur = client.chat.completions.create(model=model, messages=messages, temperature = min(temperature, 1.), n=n)
+                kwargs.update(temperature=min(temperature, 1.), n=n)
             else:
                 assert n == 1
-                if "GLM" in model:
-                    response_cur = client.chat.completions.create(model=model, messages=messages, temperature=min(temperature, 1.))
-                else:
-                    response_cur = client.chat.completions.create(model=model, messages=messages, temperature=min(temperature, 1.))
-            break
+                kwargs["temperature"] = min(temperature, 1.)
+            with _api_slots:
+                response_cur = client.chat.completions.create(**kwargs)
+            if len(response_cur.choices) != n or any(
+                not isinstance(c.message.content, str) or not c.message.content.strip()
+                for c in response_cur.choices
+            ):
+                raise LLMRequestError("API returned empty content or an unexpected choice count")
+            return response_cur.choices
         except Exception as e:
-            logging.info(f"Attempt {attempt+1} failed with error: {e}")
-            time.sleep(1)
-    if response_cur is None:
-        logging.info("Code terminated due to too many failed attempts!")
-        exit()
-            
-    return response_cur.choices
+            status = getattr(e, "status_code", None)
+            if isinstance(e, (TypeError, ValueError, AssertionError)) or (
+                isinstance(status, int) and 400 <= status < 500 and status not in (408, 409, 429)
+            ):
+                raise RuntimeError(f"Permanent LLM request error: {e}") from e
+            last_error = e
+            logging.warning("LLM attempt %d/%d failed: %s", attempt + 1, _api_attempts, e)
+            if attempt + 1 < _api_attempts:
+                delay = min(30, 2 ** attempt)
+                headers = getattr(getattr(e, "response", None), "headers", {})
+                try:
+                    delay = max(delay, min(120, float(headers.get("retry-after", 0))))
+                except (TypeError, ValueError):
+                    pass
+                time.sleep(delay)
+    raise LLMRequestError(f"LLM request failed after {_api_attempts} attempts: {last_error}") from last_error
 
 
 def extract_code_from_generator(content: str) -> str:
@@ -205,6 +257,8 @@ def extract_code_from_generator(content: str) -> str:
     """
     # Try to extract code from markdown code block
     # 尝试从 Markdown 代码块中提取代码
+    if not isinstance(content, str) or not content.strip():
+        return None
     pattern_code = r'```python(.*?)```'
     code_match = re.search(pattern_code, content, re.DOTALL)
     code_string = code_match.group(1).strip() if code_match else None

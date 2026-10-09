@@ -41,6 +41,10 @@ runtime_output_root: ${llm_runtime_output_root:${experiment_key},${execution_id}
 model: qwen-plus # #gpt-3.5-turbo-0125  # LLM model (other options include gpt-4-turbo-preview; GLM-3-Turbo, GLM-4; and moonshot-v1-8k) 
                  # 大语言模型（其他选项包括 gpt-4-turbo-preview、GLM-3-Turbo、GLM-4 和 moonshot-v1-8k）
 temperature: 1  # temperature for chat completion
+llm_api:
+  max_parallel_requests: 4
+  max_attempts: 3
+  timeout: 180 # API timeout, independent of the simulation timeout below
                 # 聊天补全的温度参数
 # 留空时不在全局层覆盖算例编号，而是由问题 YAML 根据 train/test 模式
 # 分别读取 dataset.train_seeds 或 dataset.test_seeds。这样训练集与测试集
@@ -131,7 +135,7 @@ surrogate:
   checkpoint_path: surrogate/model_checkpoint.pkl
   warmup:
     min_structures: 20
-    min_exact_evaluations: 300
+    min_exact_evaluations: 200
   structure_gate:
     initial_full_cma_fraction: 0.70
     mature_full_cma_fraction: 0.50

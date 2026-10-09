@@ -34,7 +34,7 @@ quick 特征中的 feasibility/violation/lateness/跨 seed 方差置零。筛选
 LLM 的性能反馈只包含 mean fuzzy energy，避免安全指标或建议重新进入反思 Prompt。
 不新增 LLM 请求；generation/population/repair budget 与原配置一致。
 默认单次评价子进程超时为 300 秒（`timeout=300`）。代理需要先积累真实标签并
-通过验证：默认至少 300 个真实标签，结构至少 20 个、参数至少 12 个；冷启动
+通过验证：默认至少 200 个真实标签，结构至少 20 个、参数至少 12 个；冷启动
 阶段不会立即加速。代理不改变 LLM 请求预算，实际节省时间取决于模型质量。
 
 ## 生成与导出：SS_T 示例

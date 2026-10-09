@@ -10,6 +10,7 @@ import hashlib
 import shutil
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
+from time import perf_counter
 from time import time
 from omegaconf import OmegaConf
 
@@ -895,7 +896,8 @@ class SeEvo:
                 [messages], # 一组提示词
                 self.cfg.init_pop_size, # 需要生成多少条响应
                 self.cfg.model,  # 使用哪个大语言模型
-                self.cfg.temperature + 0.3 # 实际生成温度
+                self.cfg.temperature + 0.3, # 实际生成温度
+                allow_partial=True,
             )
             # 将LLM响应转换为个体
             population = self._responses_to_validated_individuals(
@@ -979,7 +981,10 @@ class SeEvo:
             raise RuleValidationError("candidate response contains no Python rule")
         config = self._optimizer_config()
         if getattr(self, "llm_objective", "original") == "energy_only":
-            validate_energy_only_source(source)
+            try:
+                validate_energy_only_source(source)
+            except (SyntaxError, ValueError) as exc:
+                raise RuleValidationError(str(exc)) from exc
             individual["llm_objective"] = "energy_only"
         candidate = parse_rule_candidate(
             source,
@@ -1230,7 +1235,7 @@ class SeEvo:
         bypass_cache_read: bool = False,
     ) -> list[dict]:
         """Evaluate a parameter batch through one bounded global context pool."""
-        del stage  # Stage affects the common seed set, not scheduling semantics.
+        batch_started = perf_counter()
         parameter_maps = [dict(parameters) for parameters in parameter_maps]
         if not parameter_maps:
             return []
@@ -1341,7 +1346,7 @@ class SeEvo:
         )
         duplicate_count = len(contexts) - cached_count - len(pending)
         logging.info(
-            "Parameter batch structure=%s vectors=%d contexts=%d cached=%d "
+            "Parameter batch stage=" + stage + " structure=%s vectors=%d contexts=%d cached=%d "
             "deduplicated=%d pending=%d workers=%d",
             candidate.structure_hash,
             len(parameter_maps),
@@ -1418,6 +1423,8 @@ class SeEvo:
             self.parameter_evaluation_count = int(
                 getattr(self, "parameter_evaluation_count", 0)
             ) + len(pending)
+        logging.info("[evaluation batch] stage=%s pending=%d cached=%d wall_seconds=%.3f",
+                     stage, len(pending), cached_count, perf_counter() - batch_started)
         return aggregates
 
     def _write_parameter_artifacts(
@@ -1790,6 +1797,7 @@ class SeEvo:
         输出：
             dict。返回包含 stdout_filepath、code_path、code、response_id 的个体字典。
         """
+        response = response if isinstance(response, str) else ""
         # Save response to file
         # 将响应保存到文件
         default_file_name = file_name is None
@@ -1917,12 +1925,14 @@ class SeEvo:
                     max_retries,
                     failure_reason,
                 )
-                repaired = multi_chat_completion(
-                    [repair_messages],
-                    1,
-                    self.cfg.model,
-                    repair_temperature,
-                )[0]
+                try:
+                    repaired = multi_chat_completion(
+                        [repair_messages], 1, self.cfg.model, repair_temperature,
+                    )[0]
+                except LLMRequestError as exc:
+                    failure_reason = f"repair API failed: {exc}"
+                    individual["candidate_validation_error"] = failure_reason
+                    break
                 repair_file = (
                     f"problem_iter{self.iteration}_response{response_id}"
                     f"_repair{attempt}"
@@ -2359,13 +2369,15 @@ class SeEvo:
             # 等待代码执行完成
             try:
                 # 超时时间来自 cfg.timeout；候选若包含慢操作或死循环会被强制终止。
-                inner_run.communicate(timeout=self.cfg.timeout)
+                remaining = max(0.001, self.cfg.timeout - (perf_counter() - getattr(inner_run, "_seevo_started", perf_counter())))
+                inner_run.communicate(timeout=remaining)
             except subprocess.TimeoutExpired as e:
                 logging.info(f"Timeout for response_id {response_id}: {e}")
                 population[response_id] = self.mark_invalid_individual(
                     population[response_id], str(e)
                 )
                 inner_run.kill() # 强制终止子进程，并跳出后续输出解析
+                inner_run.communicate()
                 continue
             
             # 读取个体的输出文件
@@ -3495,6 +3507,8 @@ class SeEvo:
         child_env = os.environ.copy()
         child_env["PYTHONIOENCODING"] = "utf-8"
         child_env["PYTHONUTF8"] = "1"
+        for name in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
+            child_env[name] = "1"
         with open(individual["stdout_filepath"], 'w', encoding='utf-8') as f:
             process = subprocess.Popen(
                 command,
@@ -3503,14 +3517,8 @@ class SeEvo:
                 env=child_env,
             )
 
-        # Wait until evaluation starts
-        # 等待评估进程开始输出
-        block_until_running(
-            individual["stdout_filepath"], 
-            log_status=True, 
-            iter_num=self.iteration, 
-            response_id=response_id
-        )
+        # eval.py may stay silent until completion; never wait for its first output.
+        process._seevo_started = perf_counter()
         return process
     
     def update_iter(self) -> None:
@@ -4125,7 +4133,7 @@ class SeEvo:
         # Generate new individuals asynchronously
         # 异步生成新个体
         response_lst = multi_chat_completion(
-            messages_lst, 1, self.cfg.model, self.cfg.temperature
+            messages_lst, 1, self.cfg.model, self.cfg.temperature, allow_partial=True,
         )
         crossed_population = self._responses_to_validated_individuals(
             response_lst,
@@ -4181,7 +4189,7 @@ class SeEvo:
         # Generate evolved individuals asynchronously
         # 异步生成自进化后的个体
         response_lst = multi_chat_completion(
-            messages_lst, 1, self.cfg.model, self.cfg.temperature
+            messages_lst, 1, self.cfg.model, self.cfg.temperature, allow_partial=True,
         )
         evolved_population = self._responses_to_validated_individuals(
             response_lst,
@@ -4243,7 +4251,7 @@ class SeEvo:
         # 生成变异个体
         num_mutations = int(self.cfg.pop_size * self.mutation_rate)
         responses = multi_chat_completion(
-            [messages], num_mutations, self.cfg.model, self.cfg.temperature
+            [messages], num_mutations, self.cfg.model, self.cfg.temperature, allow_partial=True,
         )
         population = self._responses_to_validated_individuals(
             responses,

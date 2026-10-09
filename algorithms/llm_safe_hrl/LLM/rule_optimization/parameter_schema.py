@@ -91,6 +91,8 @@ _FORBIDDEN_ATTRIBUTE_NAMES = frozenset(
         "system",
         "unlink",
         "write",
+        "save", "savez", "savez_compressed", "savetxt", "loadtxt",
+        "genfromtxt", "fromfile", "tofile", "memmap", "datasource",
     }
 )
 _ALLOWED_STRUCTURAL_NUMBERS = frozenset({-2.0, -1.0, 0.0, 1.0, 2.0})
@@ -425,6 +427,9 @@ def _validate_imports_and_safety(tree: ast.Module, function: ast.FunctionDef) ->
         elif isinstance(node, ast.ImportFrom):
             if node.module not in _ALLOWED_IMPORTS:
                 raise RuleValidationError("only numpy imports are allowed")
+            if any(alias.name == "*" or alias.name.startswith("_")
+                   or alias.name.lower() in _FORBIDDEN_ATTRIBUTE_NAMES for alias in node.names):
+                raise RuleValidationError("unsafe numpy imports are forbidden")
         elif isinstance(node, ast.FunctionDef):
             continue
         elif isinstance(node, ast.Assign):
@@ -452,7 +457,11 @@ def _validate_imports_and_safety(tree: ast.Module, function: ast.FunctionDef) ->
                 f"unsupported module-level statement: {type(node).__name__}"
             )
 
-    for node in ast.walk(function):
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and (
+            node.attr.startswith("_") or node.attr.lower() in _FORBIDDEN_ATTRIBUTE_NAMES
+        ):
+            raise RuleValidationError(f"forbidden attribute: {node.attr}")
         if isinstance(node, _FORBIDDEN_NODES):
             raise RuleValidationError(
                 f"forbidden rule construct: {type(node).__name__}"
@@ -487,7 +496,7 @@ def _validate_imports_and_safety(tree: ast.Module, function: ast.FunctionDef) ->
                 raise RuleValidationError("recursive priority rules are forbidden")
             self.generic_visit(node)
 
-    _RecursionVisitor().visit(function)
+    _RecursionVisitor().visit(tree)
 
 
 def _parameter_reference_name(node: ast.AST) -> str | None:
@@ -593,8 +602,8 @@ def parse_rule_candidate(
     raw_schema = _assignment_literal(tree, PARAMETER_SCHEMA_NAME)
     schema = None
     schema_assignment = None
+    _validate_imports_and_safety(tree, function)
     if raw_schema is not None:
-        _validate_imports_and_safety(tree, function)
         if complexity["branch_count"] > int(max_branches):
             raise RuleValidationError("rule exceeds maximum branch count")
         if complexity["ast_depth"] > int(max_ast_depth):

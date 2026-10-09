@@ -36,7 +36,8 @@ def test_direct_gpt61_call_preserves_n():
 
 
 def test_existing_gpt_and_qwen_request_parameters():
-    create = Mock(return_value=response("ok"))
+    create = Mock(side_effect=lambda **kw: SimpleNamespace(
+        choices=response("ok").choices * kw.get("n", 1)))
     client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
     with patch.object(utils, "client", client, create=True):
         utils.chat_completion(3, [], "gpt-4.1", 2.0)

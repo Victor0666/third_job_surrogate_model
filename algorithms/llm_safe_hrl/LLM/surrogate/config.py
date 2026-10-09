@@ -9,7 +9,7 @@ from typing import Any, Mapping
 @dataclass(frozen=True)
 class WarmupConfig:
     min_structures: int = 20
-    min_exact_evaluations: int = 300
+    min_exact_evaluations: int = 200
 
 
 @dataclass(frozen=True)
