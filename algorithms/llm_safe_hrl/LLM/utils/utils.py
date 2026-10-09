@@ -8,6 +8,7 @@ import ast
 import textwrap
 import threading
 import math
+from types import SimpleNamespace
 
 _api_workers = 4
 _api_attempts = 3
@@ -17,6 +18,49 @@ _api_slots = threading.BoundedSemaphore(_api_workers)
 
 class LLMRequestError(RuntimeError):
     """A temporary request failure after bounded retries."""
+
+
+def _collect_stream_choices(stream, n, started):
+    """Return only complete text choices; a broken stream cannot become a rule."""
+    parts = [[] for _ in range(n)]
+    finished = set()
+    chunks = 0
+    try:
+        for chunk in stream:
+            chunks += 1
+            elapsed = time.perf_counter() - started
+            if elapsed > _api_timeout:
+                raise LLMRequestError("LLM stream exceeded the total request timeout")
+            if chunks == 1:
+                logging.info("[llm stream] first_chunk_seconds=%.3f", elapsed)
+            for choice in chunk.choices:
+                index = choice.index
+                if not isinstance(index, int) or not 0 <= index < n:
+                    raise LLMRequestError("LLM stream returned an invalid choice index")
+                text = getattr(choice.delta, "content", None)
+                if text is not None:
+                    if not isinstance(text, str):
+                        raise LLMRequestError("LLM stream returned non-text content")
+                    parts[index].append(text)
+                # reasoning_content is deliberately excluded from generated code.
+                reason = choice.finish_reason
+                if reason is not None:
+                    if reason != "stop":
+                        raise LLMRequestError(f"LLM stream did not finish normally: {reason}")
+                    finished.add(index)
+        if finished != set(range(n)):
+            raise LLMRequestError("LLM stream ended before all choices finished")
+        choices = [SimpleNamespace(index=i, message=SimpleNamespace(content="".join(text)))
+                   for i, text in enumerate(parts)]
+        if any(not choice.message.content.strip() for choice in choices):
+            raise LLMRequestError("LLM stream returned empty text")
+        logging.info("[llm stream] completed chunks=%d choices=%d wall_seconds=%.3f",
+                     chunks, n, time.perf_counter() - started)
+        return choices
+    finally:
+        close = getattr(stream, "close", None)
+        if callable(close):
+            close()
 
 
 def init_client(cfg):
@@ -221,8 +265,14 @@ def chat_completion(n: int, messages: list[dict], model: str, temperature: float
                 kwargs.update(reasoning_effort="medium", extra_body={
                     "enable_thinking": True, "preserve_thinking": False,
                 })
+            streaming = model.startswith(("gpt", "qwen"))
+            if streaming:
+                kwargs["stream"] = True
             with _api_slots:
+                started = time.perf_counter()
                 response_cur = client.chat.completions.create(**kwargs)
+                if streaming:
+                    return _collect_stream_choices(response_cur, n, started)
             if len(response_cur.choices) != n or any(
                 not isinstance(c.message.content, str) or not c.message.content.strip()
                 for c in response_cur.choices

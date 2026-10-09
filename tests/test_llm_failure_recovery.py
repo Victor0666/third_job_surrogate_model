@@ -19,7 +19,14 @@ def response(text):
 
 
 def client(create):
-    return SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+    def request(**kwargs):
+        result = create(**kwargs)
+        if not kwargs.get("stream"):
+            return result
+        return iter([SimpleNamespace(choices=[SimpleNamespace(
+            index=i, delta=SimpleNamespace(content=c.message.content), finish_reason="stop",
+        ) for i, c in enumerate(result.choices)])])
+    return SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=request)))
 
 
 def test_permanent_error_never_retries_or_exits_successfully():

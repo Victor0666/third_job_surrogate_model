@@ -46,6 +46,13 @@ LLM 的性能反馈只包含 mean fuzzy energy，避免安全指标或建议重�
 修复都使用同一设置；qwen-plus 和 GPT 分支不受影响。建议显式设置
 `llm_api.timeout=300`；这与仿真 `timeout=300` 是两个独立参数。
 
+GPT 和 Qwen 的共享调用默认使用 `stream=True`。程序按 choice 索引收集
+`delta.content`，不把思考文本写入规则；完整正常结束后才进入校验。
+断流、超时、空回复和长度截断会进入有限重试，失败尝试的半截文本不会拼入
+下一次回复。生成、反思和修复均使用流式，无需修改原启动命令。
+日志中的 `[llm stream] first_chunk_seconds` 和 `completed` 可用于检查流式进度。
+中转站仍需支持并及时转发流式数据；流式不能解决欠费或保证消除网关超时。
+
 在 Linux 仓库根目录、已安装依赖的环境执行。API 凭据沿用原 LLM 设置。
 
 ```bash

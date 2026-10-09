@@ -5,8 +5,10 @@ from unittest.mock import Mock, patch
 from algorithms.llm_safe_hrl.LLM.utils import utils
 
 
-def response(text):
-    return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=text))])
+def response(text, n=1):
+    return iter([SimpleNamespace(choices=[SimpleNamespace(
+        index=i, delta=SimpleNamespace(content=text), finish_reason="stop",
+    ) for i in range(n)])])
 
 
 def test_gpt61_multi_preserves_candidate_count_and_order():
@@ -25,6 +27,7 @@ def test_gpt61_multi_preserves_candidate_count_and_order():
         assert "temperature" not in call.kwargs
         assert call.kwargs["reasoning_effort"] == "medium"
         assert call.kwargs["n"] == 1
+        assert call.kwargs["stream"] is True
 
 
 def test_direct_gpt61_call_preserves_n():
@@ -36,22 +39,21 @@ def test_direct_gpt61_call_preserves_n():
 
 
 def test_existing_gpt_and_qwen_request_parameters():
-    create = Mock(side_effect=lambda **kw: SimpleNamespace(
-        choices=response("ok").choices * kw.get("n", 1)))
+    create = Mock(side_effect=lambda **kw: response("ok", kw.get("n", 1)))
     client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
     with patch.object(utils, "client", client, create=True):
         utils.chat_completion(3, [], "gpt-4.1", 2.0)
-        assert create.call_args.kwargs == dict(model="gpt-4.1", messages=[], temperature=1.0, n=3)
+        assert create.call_args.kwargs == dict(model="gpt-4.1", messages=[], temperature=1.0, n=3, stream=True)
         assert utils.multi_chat_completion(
             [{"role": "user", "content": "test"}], 2, "qwen-plus", 0.0,
         ) == ["ok", "ok"]
         assert create.call_args.kwargs == dict(
-            model="qwen-plus", messages=[{"role": "user", "content": "test"}], temperature=0.0,
+            model="qwen-plus", messages=[{"role": "user", "content": "test"}], temperature=0.0, stream=True,
         )
 
 
 def test_qwen38_max_and_snapshot_use_consistent_thinking_settings():
-    create = Mock(return_value=response("code"))
+    create = Mock(side_effect=lambda **kw: response("code"))
     client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
     with patch.object(utils, "client", client, create=True):
         for model in ("qwen3.8-max", "qwen3.8-max-0902"):
@@ -62,4 +64,5 @@ def test_qwen38_max_and_snapshot_use_consistent_thinking_settings():
                 model=model, messages=[{"role": "user", "content": "generate"}],
                 temperature=0.0, reasoning_effort="medium",
                 extra_body={"enable_thinking": True, "preserve_thinking": False},
+                stream=True,
             )

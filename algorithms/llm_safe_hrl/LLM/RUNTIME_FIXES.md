@@ -65,6 +65,14 @@ No search budget or diagnostic setting was reduced to obtain faster numbers.
 
 ## Server checks
 
+GPT/Qwen now use streaming Chat Completions in the shared caller. The complete
+text interface returned to SeEvo is unchanged. Reasoning deltas are excluded;
+all choice indices must finish with `stop`. Partial, empty or truncated streams
+are retried within the same limit and are never sent to rule evaluation.
+The connection is closed after each attempt, and the API semaphore remains held
+until stream consumption ends. Existing launch commands require no stream flag.
+This does not guarantee a gateway will forward chunks promptly or fix billing.
+
 Upgrade the SDK in the same environment used to launch experiments:
 
 ```bash
