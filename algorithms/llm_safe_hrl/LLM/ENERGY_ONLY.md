@@ -39,6 +39,13 @@ LLM 的性能反馈只包含 mean fuzzy energy，避免安全指标或建议重�
 
 ## 生成与导出：SS_T 示例
 
+使用 Qwen3.8-Max 时设置 `model=qwen3.8-max`，固定快照可设置
+`model=qwen3.8-max-0902`。仍读取 `QWEN_API_KEY` 和 DashScope 接口。
+共享 API 调用自动设置 `reasoning_effort=medium`、`enable_thinking=true`、
+`preserve_thinking=false`（SeEvo 不保存历史 reasoning_content）。生成、反思和
+修复都使用同一设置；qwen-plus 和 GPT 分支不受影响。建议显式设置
+`llm_api.timeout=300`；这与仿真 `timeout=300` 是两个独立参数。
+
 在 Linux 仓库根目录、已安装依赖的环境执行。API 凭据沿用原 LLM 设置。
 
 ```bash

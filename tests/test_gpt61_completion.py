@@ -48,3 +48,18 @@ def test_existing_gpt_and_qwen_request_parameters():
         assert create.call_args.kwargs == dict(
             model="qwen-plus", messages=[{"role": "user", "content": "test"}], temperature=0.0,
         )
+
+
+def test_qwen38_max_and_snapshot_use_consistent_thinking_settings():
+    create = Mock(return_value=response("code"))
+    client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+    with patch.object(utils, "client", client, create=True):
+        for model in ("qwen3.8-max", "qwen3.8-max-0902"):
+            assert utils.multi_chat_completion(
+                [{"role": "user", "content": "generate"}], 2, model, 0.0,
+            ) == ["code", "code"]
+            assert create.call_args.kwargs == dict(
+                model=model, messages=[{"role": "user", "content": "generate"}],
+                temperature=0.0, reasoning_effort="medium",
+                extra_body={"enable_thinking": True, "preserve_thinking": False},
+            )

@@ -70,7 +70,7 @@ def init_client(cfg):
         base_url = os.getenv('CUSTOM_API_BASE_URL', 'http://localhost:8000/v1/')
         client = OpenAI(api_key="EMPTY", base_url=base_url, **client_options)
 
-    if cfg.model.startswith("gpt-6.1-sol"):
+    if cfg.model.startswith(("gpt-6.1-sol", "qwen3.8-max")):
         if "reasoning_effort" not in inspect.signature(client.chat.completions.create).parameters:
             raise RuntimeError("OpenAI SDK lacks reasoning_effort; run python -m pip install --upgrade openai")
         
@@ -216,6 +216,11 @@ def chat_completion(n: int, messages: list[dict], model: str, temperature: float
             else:
                 assert n == 1
                 kwargs["temperature"] = min(temperature, 1.)
+            if model.startswith("qwen3.8-max"):
+                # SeEvo retains content only, not historical reasoning_content.
+                kwargs.update(reasoning_effort="medium", extra_body={
+                    "enable_thinking": True, "preserve_thinking": False,
+                })
             with _api_slots:
                 response_cur = client.chat.completions.create(**kwargs)
             if len(response_cur.choices) != n or any(
