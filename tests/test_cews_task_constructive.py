@@ -29,7 +29,7 @@ from base.hrl_env import (
     NoFeasibleVMError,
     validate_task_priority_scores,
 )
-from common.resource_opt import create_cluster
+from common.resource_opt import create_cluster, TriangularFuzzyNumber
 from problems.cews_task_constructive.eval import (
     _add_objective_and_constraints,
     build_environment,
@@ -86,6 +86,10 @@ def _vm_policy_environment(deadline: float):
     }
     environment.vm_available_at = np.array([0.0, 0.0], dtype=float)
     environment.get_feasible_vms = lambda task: [0, 1]
+    environment.estimate_task_finish_tfn = lambda task, vm: TriangularFuzzyNumber(
+        *([environment.current_time + environment.estimate_exec_time(task, vm)
+           + environment.estimate_comm_time(task, vm)] * 3)
+    )
     return environment
 
 
@@ -213,6 +217,10 @@ def _late_host_environment(deadline=10.0):
     }
     environment.vm_available_at = np.zeros(4, dtype=float)
     environment.get_feasible_vms = lambda task: [0, 1, 2, 3]
+    environment.estimate_task_finish_tfn = lambda task, vm: TriangularFuzzyNumber(
+        *([environment.current_time + environment.estimate_exec_time(task, vm)
+           + environment.estimate_comm_time(task, vm)] * 3)
+    )
     # 完成时刻只由 exec_time 决定：0/1 与 3 延期，只有 2 按时。
     environment.estimate_exec_time = lambda task, vm: {
         0: 20.0,

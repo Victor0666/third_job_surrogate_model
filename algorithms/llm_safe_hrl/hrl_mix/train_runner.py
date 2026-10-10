@@ -927,6 +927,9 @@ def train(
 
     if training_resume_payload is not None:
         saved_config = training_resume_payload["config_snapshot"]["config"]
+        from common.scheduling_transport import COMMUNICATION_MODEL_VERSION
+        if saved_config.get("communication_model_version") != COMMUNICATION_MODEL_VERSION:
+            raise ValueError("training resume communication model mismatch; start a new run")
         # Historical configs without this field used 1e-3.
         if float(saved_config.get("energy_reward_scale", 1e-3)) != cfg.energy_reward_scale:
             raise ValueError("Energy reward scale resume config mismatch")

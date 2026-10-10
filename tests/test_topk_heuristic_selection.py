@@ -16,6 +16,7 @@ from algorithms.llm_safe_hrl.LLM.export_topk import (
     topk_ranking_key,
 )
 from algorithms.llm_safe_hrl.base.heuristic_admission import (
+    CEWS_EVALUATOR_PROTOCOL_VERSION,
     file_sha256,
 )
 from algorithms.llm_safe_hrl.base.manager_heuristics import (
@@ -81,7 +82,7 @@ def _scope():
 def _metrics(source: Path, metadata: dict) -> dict:
     source_hash = file_sha256(source)
     return {
-        "evaluator_protocol_version": 3,
+        "evaluator_protocol_version": CEWS_EVALUATOR_PROTOCOL_VERSION,
         "function_name": "get_task_priority_v2",
         "interface_valid": True,
         "candidate_sha256": source_hash,

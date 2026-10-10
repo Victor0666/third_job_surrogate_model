@@ -9,6 +9,8 @@ from types import SimpleNamespace
 import pytest
 
 from algorithms.comparisons import evaluate_fuzzy_baseline as evaluator
+from algorithms.comparisons.fuzzy_common.training import _checkpoint_identity
+from algorithms.llm_safe_hrl.scenario_registry import resolve_experiment_protocol
 
 
 def _cache_paths(tmp_path: Path) -> dict[str, str]:
@@ -46,6 +48,16 @@ def test_frozen_single_evaluation_writes_json_and_csv(
         encoding="utf-8",
     )
     cache_paths = _cache_paths(tmp_path)
+    for path in cache_paths.values():
+        Path(path).write_text("{}", encoding="utf-8")
+    protocol = evaluator.protocol_from_config(
+        evaluator.load_protocol_config(evaluator.DEFAULT_CONFIG), scenario="SM", ddl="M",
+        experiment_context=resolve_experiment_protocol("single", source_scenario="SM"),
+        deadline_cache_path=cache_paths["SM"], deadline_cache_paths=cache_paths,
+    )
+    (tmp_path / "checkpoint_identity.json").write_text(
+        json.dumps(_checkpoint_identity(protocol, checkpoint)), encoding="utf-8",
+    )
     calls = {
         "builder": [],
         "loaded": [],

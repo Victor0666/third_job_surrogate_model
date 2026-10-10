@@ -93,7 +93,7 @@ class ExperimentMatrixTests(unittest.TestCase):
 
     def test_all_runs_share_fixtures_evaluation_and_metrics(self):
         manifest = build_experiment_manifest(CONFIG)
-        self.assertEqual(len(manifest["runs"]), 20)
+        self.assertEqual(len(manifest["runs"]), len(REQUIRED_METHOD_IDS) + len(REQUIRED_ABLATION_IDS))
         self.assertEqual(
             manifest["generator"]["module"],
             "hrl_mix.experiment_matrix",

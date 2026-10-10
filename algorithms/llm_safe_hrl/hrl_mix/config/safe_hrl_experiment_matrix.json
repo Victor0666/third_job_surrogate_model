@@ -342,7 +342,8 @@
         "strict_ddl_feasibility_with_llm",
         "strict_ddl_feasibility_without_llm"
       ]
-    }
+    },
+    "communication_model_version": "input_transfer_then_compute_output_v1"
   },
   "information_contracts": {
     "legacy_hrl": {
@@ -490,6 +491,18 @@
       "vm_inputs": [
         "global_vm_observation",
         "legal_vm_mask"
+      ],
+      "llm_rule_inputs": [],
+      "llm_rule_outputs": []
+    },
+    "mtgp": {
+      "manager_inputs": [
+        "arrived_vm_queue_mtgp12_features"
+      ],
+      "host_inputs": [],
+      "vm_inputs": [
+        "task_vm_mtgp12_features",
+        "feasible_vm_ids"
       ],
       "llm_rule_inputs": [],
       "llm_rule_outputs": []
@@ -907,6 +920,38 @@
         "llm_demonstration_pretraining": false,
         "training_seed_mode": "multi_seed",
         "information_contract_id": "drlea_nichgp"
+      }
+    },
+    {
+      "method_id": "mtgp",
+      "description": "MTGP jointly evolves routing and sequencing trees; sequencing acts only after input transfer reaches a VM.",
+      "execution_adapter": "mtgp_pipeline",
+      "output_namespace": "mtgp",
+      "components": {
+        "policy_family": "mtgp",
+        "manager_policy": "gp_arrived_vm_queue_sequencing",
+        "manager_observation": "arrived_vm_queue_mtgp12_features",
+        "task_ordering": "gp_per_vm_queue",
+        "heuristic_candidate_set": "one_frozen_tree_pair",
+        "fixed_heuristic_id": null,
+        "llm_enabled": false,
+        "llm_rule_mode": "none",
+        "llm_host_vm_access": false,
+        "host_policy": "implicit_in_global_vm_action",
+        "vm_policy": "gp_routing",
+        "safe_rl": false,
+        "safety_cost_recording": false,
+        "safety_value_network": false,
+        "safety_shield": false,
+        "task_level_safety_deadline": false,
+        "fallback_controller": false,
+        "empty_safe_action_behavior": "feasible_vm_routing_then_arrived_queue_dispatch",
+        "lagrange_mode": "none",
+        "lambda_value": null,
+        "demonstration_pretraining": false,
+        "llm_demonstration_pretraining": false,
+        "training_seed_mode": "multi_seed",
+        "information_contract_id": "mtgp"
       }
     }
   ],

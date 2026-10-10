@@ -40,6 +40,7 @@ env_cloud_workflow_d3qn_state_reworked_multiagent_Tsize_alpha15.py
 """
 
 import heapq
+from common.scheduling_transport import COMMUNICATION_MODEL_VERSION, execution_window
 import numpy as np
 
 try:
@@ -60,6 +61,7 @@ def _safe_div(a, b, eps=1e-9):
 
 
 class CloudWorkflowEnv_VMAgents(gym.Env):
+    communication_model_version = COMMUNICATION_MODEL_VERSION
     metadata = {"render.modes": ["human"]}
 
     # ---------------- 初始化 ----------------
@@ -998,7 +1000,7 @@ class CloudWorkflowEnv_VMAgents(gym.Env):
             t_upload    = in_bits  / max(bw_bps_vm, 1e-9)
             t_compute   = mi       / max(vm.pc, 1e-9)
             t_download  = out_bits / max(bw_bps_vm, 1e-9)
-            pred_finish = max(now, float(self.vm_available_at[j])) + t_upload + t_compute + t_download
+            _, _, pred_finish = execution_window(now, t_upload, self.vm_available_at[j], t_compute, t_download)
             vm_block[j] = np.array([
                 idle_flag,
                 avail_delay / max(self.horizon, 1.0),
@@ -1065,8 +1067,7 @@ class CloudWorkflowEnv_VMAgents(gym.Env):
         t_compute  = mi       / max(pc_mi_s, 1e-9)
         t_download = out_bits / max(bw_bps, 1e-9)
 
-        start_time = max(now, float(self.vm_available_at[vm_index]))
-        end_time   = start_time + t_upload + t_compute + t_download
+        _, start_time, end_time = execution_window(now, t_upload, self.vm_available_at[vm_index], t_compute, t_download)
 
         self.task_state[task_id] = "Running"
         self.task_end_time[task_id] = end_time

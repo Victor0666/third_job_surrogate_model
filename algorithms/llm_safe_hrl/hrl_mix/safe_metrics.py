@@ -402,6 +402,7 @@ def build_episode_metric_record(
         shield_getter() if callable(shield_getter) else []
     )
     record = {
+        "communication_model_version": getattr(env, "communication_model_version", "legacy_combined_v0"),
         "seed": int(seed),
         **_workflow_metrics(env),
         **_control_metrics(shield_records),
@@ -462,6 +463,9 @@ def aggregate_safe_metric_records(
     if not records:
         raise ValueError("safe metric aggregation requires records")
     rows = [dict(record) for record in records]
+    versions = {row.get("communication_model_version", "legacy_combined_v0") for row in rows}
+    if len(versions) != 1:
+        raise ValueError("cannot aggregate evaluations from different communication models")
     completed = sum(
         _count(
             row["completed_workflow_count"],

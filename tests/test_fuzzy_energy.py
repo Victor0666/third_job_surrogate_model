@@ -308,6 +308,9 @@ class FuzzyVMSelectionTests(unittest.TestCase):
             0: 10.0,
             1: 2.0,
         }[int(vm)]
+        environment.estimate_task_finish_tfn = lambda task, vm: TriangularFuzzyNumber(
+            *([environment.estimate_exec_time(task, vm)] * 3)
+        )
         selected, _ = environment.select_vm_deterministic(0)
         self.assertEqual(selected, 1)
 

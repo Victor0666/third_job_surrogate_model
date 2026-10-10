@@ -167,6 +167,7 @@ def main(argv: list[str] | None = None) -> int:
         / "out"
         / "fuzzy_comparisons"
         / args.method
+        / "transport_v1"
         / (
             "main_single"
             if protocol.protocol_mode == "single"

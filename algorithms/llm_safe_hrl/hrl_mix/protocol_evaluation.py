@@ -374,6 +374,9 @@ def _snapshot_config(
             "checkpoint config_snapshot config must be a mapping"
         )
 
+    from common.scheduling_transport import COMMUNICATION_MODEL_VERSION
+    if config.get("communication_model_version") != COMMUNICATION_MODEL_VERSION:
+        raise ValueError("checkpoint uses a different communication model; retrain before formal evaluation")
     return dict(config)
 
 

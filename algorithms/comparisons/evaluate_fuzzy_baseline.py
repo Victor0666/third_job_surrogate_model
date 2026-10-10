@@ -20,6 +20,7 @@ from algorithms.comparisons.run_fuzzy_baseline import (
     DEFAULT_CONFIG,
     build_policy,
 )
+from algorithms.comparisons.fuzzy_common.training import _validate_checkpoint_identity
 from algorithms.llm_safe_hrl.scenario_registry import (
     resolve_experiment_protocol,
 )
@@ -216,6 +217,7 @@ def evaluate_checkpoint(
 
     reward_config = dict(config.get("reward", {}))
     training_config = dict(config.get("training", {}))
+    _validate_checkpoint_identity(protocol, checkpoint_path, checkpoint_path.parent / "checkpoint_identity.json")
     prototype = make_environment(
         protocol,
         protocol.train_seeds[0],

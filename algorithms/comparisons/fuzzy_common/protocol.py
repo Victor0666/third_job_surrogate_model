@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from . import LLM_SAFE_HRL_ROOT  # noqa: F401  Ensures legacy imports resolve.
+from common.scheduling_transport import COMMUNICATION_MODEL_VERSION
 from hrl_mix.train_config import (
     TrainConfig,
     build_train_config,
@@ -267,6 +268,7 @@ class FuzzyComparisonProtocol:
     def environment_manifest(self) -> dict[str, Any]:
         config = self.train_config(self.train_seeds[0])
         payload = {
+            "communication_model_version": COMMUNICATION_MODEL_VERSION,
             "workflow_files": [
                 str(Path(value).resolve()) for value in config.dax_list
             ],

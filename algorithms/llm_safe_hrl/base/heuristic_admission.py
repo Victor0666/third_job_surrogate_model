@@ -29,10 +29,8 @@ except ModuleNotFoundError:  # Package-style imports used by some test runners.
 
 ADMISSION_MANIFEST_SCHEMA_VERSION = 3
 ADMISSION_RECORD_SCHEMA_VERSION = 2
-# v3: CEWS 评价器只从空闲 VM 中选择，并按 Host -> VM 的层次执行同一条固定
-# 规则。v2 及更早的报告由 busy-VM 排队产生，调度结果与 deadline 缓存、各比较
-# 算法及 Safe-HRL 运行时不可比，必须重新评价。
-CEWS_EVALUATOR_PROTOCOL_VERSION = 3
+# v4 splits input transfer from VM execution; old admission results must be re-evaluated.
+CEWS_EVALUATOR_PROTOCOL_VERSION = 4
 DEFAULT_MANIFEST_ID = "cews_safe_manager_heuristics"
 DEFAULT_MANIFEST_VERSION = "2026-07-31.resource-domain.v1"
 DEFAULT_TRUSTED_SOURCE_ROOT = "generated"

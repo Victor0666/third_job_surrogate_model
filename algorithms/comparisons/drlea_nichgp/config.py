@@ -14,6 +14,7 @@ from algorithms.llm_safe_hrl.scenario_registry import (
     resolve_experiment_protocol,
 )
 from project_paths import PROJECT_ROOT
+from common.scheduling_transport import COMMUNICATION_MODEL_VERSION
 from algorithms.llm_safe_hrl.hrl_mix.train_config import (
     parse_deadline_cache_overrides,
 )
@@ -161,6 +162,7 @@ class ComparisonConfig:
     edge_pc_tiers: tuple[float, ...]
     cloud_bw_tiers: tuple[float, ...]
     edge_bw_tiers: tuple[float, ...]
+    communication_model_version: str = COMMUNICATION_MODEL_VERSION
     routing: AgentConfig = field(default_factory=AgentConfig)
     sequencing: AgentConfig = field(default_factory=AgentConfig)
     gp: GPConfig = field(default_factory=GPConfig)
@@ -178,7 +180,7 @@ class ComparisonConfig:
             parent = "main_single" if self.protocol == "single" else "enhancement_multi"
             group = self.source_scenario if self.protocol == "single" else self.resource_scale
             namespace = Path(parent) / str(group) / f"{short_ddl}_a{self.algorithm_seed}"
-        return PROJECT_ROOT / "out" / "comparisons" / METHOD_ID / namespace
+        return PROJECT_ROOT / "out" / "comparisons" / METHOD_ID / "transport_v1" / namespace
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -243,6 +245,8 @@ def config_from_dict(payload: Mapping[str, Any]) -> ComparisonConfig:
             f"missing={missing}, unknown={unknown}"
         )
     values = dict(payload)
+    if values["communication_model_version"] != COMMUNICATION_MODEL_VERSION:
+        raise ValueError("DRL-EA communication model mismatch; retrain on the current simulator")
     for name in _TUPLE_CONFIG_FIELDS:
         values[name] = tuple(values[name])
     values["deadline_cache_path"] = _project_data_relative_path(
@@ -288,6 +292,7 @@ def load_config(path: str | Path) -> ComparisonConfig:
 
 
 PROTOCOL_ARTIFACT_FIELDS = (
+    "communication_model_version",
     "protocol",
     "source_scenario",
     "resource_scale",
@@ -304,6 +309,7 @@ PROTOCOL_ARTIFACT_FIELDS = (
 def protocol_artifact_identity(config: ComparisonConfig) -> dict[str, Any]:
     """Return the immutable training/evaluation identity for DRL-EA artifacts."""
     return {
+        "communication_model_version": COMMUNICATION_MODEL_VERSION,
         "protocol": str(config.protocol),
         "source_scenario": config.source_scenario,
         "resource_scale": str(config.resource_scale),

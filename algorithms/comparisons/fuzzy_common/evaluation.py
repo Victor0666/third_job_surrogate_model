@@ -84,6 +84,9 @@ def aggregate_paper_final_metrics(
     if not records:
         raise ValueError("paper final metrics require at least one record")
     rows = [dict(record) for record in records]
+    versions = {row.get("communication_model_version", "legacy_combined_v0") for row in rows}
+    if len(versions) != 1:
+        raise ValueError("cannot aggregate evaluations from different communication models")
     if "completed_workflow_count" in rows[0]:
         aggregate = aggregate_safe_metric_records(rows)
         return {

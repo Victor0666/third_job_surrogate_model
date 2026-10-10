@@ -139,6 +139,7 @@ def main(argv=None):
         / "out"
         / "comparisons"
         / "drlea_nichgp"
+        / "transport_v1"
         / "main_single"
     )
     status_path = root / "gp_matrix_status.json"

@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+from common.scheduling_transport import COMMUNICATION_MODEL_VERSION
 import os
 from collections import Counter
 from dataclasses import asdict, dataclass, is_dataclass
@@ -180,6 +181,8 @@ class FeasibilityFirstModelMetrics:
             raise ValueError(
                 "model selection metrics must be a mapping"
             )
+        if not values.get("all_seed_evaluation_completed", True):
+            raise ValueError("incomplete evaluations cannot be used for model selection")
         return cls(
             deadline_violation_rate=values[
                 "deadline_violation_rate"
@@ -403,6 +406,7 @@ def build_config_snapshot(config: Any) -> dict[str, Any]:
         raise ValueError(
             "config snapshot source must be a dataclass or mapping"
         )
+    values["communication_model_version"] = COMMUNICATION_MODEL_VERSION
     canonical = json.dumps(
         values,
         ensure_ascii=False,

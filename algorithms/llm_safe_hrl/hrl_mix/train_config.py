@@ -1112,6 +1112,7 @@ def build_train_config(
             + f":energy_scale={float(safe_rl_energy_reward_scale):.17g}:energy_relative_v1"
             + ":monitor_only:actual_deadline_violation",
         )
+    run_name += "-tx1"
     if protocol_context is None:
         output_paths = training_output_paths(ROOT_DIR, run_name)
         save_dir = output_paths.checkpoint_dir
@@ -1417,12 +1418,14 @@ def build_train_config(
 
 def safety_learning_identity(config: SafeRLConfig, energy_reward_scale: float = 0.002) -> dict:
     """Constraint and observation semantics shared by demonstrations and Qc."""
+    from common.scheduling_transport import COMMUNICATION_MODEL_VERSION
     keys = (
         "safety_cost_definition", "shield_semantics", "safety_discount",
         "fuzzy_deadline_eta", "process_risk_aggregation", "lateness_normalizer",
         "lateness_clip", "fuzzy_energy_uncertainty_weight",
     )
     return {
+        "communication_model_version": COMMUNICATION_MODEL_VERSION,
         "energy_reward_scale": float(energy_reward_scale),
         "energy_observation": "energy_relative_v1",
         **{key: getattr(config, key) for key in keys},
