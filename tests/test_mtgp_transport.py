@@ -63,30 +63,26 @@ def tree(*tokens):
     return GPProgram(tokens, TERMINALS, TREE_SCHEMA)
 
 
-def test_input_transfer_overlaps_busy_vm_and_is_not_execution_load():
+def test_input_transfer_waits_for_vm_and_counts_as_execution_load():
+    assert execution_window(10, 4, 20, 8, 2) == (24, 20, 34)
     env = environment()
     env.current_time = 10.0
     env.vm_available_at[0] = 20.0
     for scenario in env.shadow_vm_available_at:
         env.shadow_vm_available_at[scenario][0] = 20.0
-    predicted = env.estimate_task_finish_tfn(0, 0)
-    assert predicted.as_tuple() == (30.0, 30.0, 30.0)
+    assert env.estimate_task_finish_tfn(0, 0).as_tuple() == (34.0, 34.0, 34.0)
     env.route_task_to_vm(0, 0)
-    assert env.task_state == ["Transferring"]
-    assert env.vm_waiting_queues[0] == []
-    assert env._records == []
-    env.current_time = 14.0
-    env._process_finish_events_at_current_time()
     assert env.task_state == ["Queued"]
     assert env.vm_waiting_queues[0] == [0]
+    assert env._records == []
     env.current_time = 20.0
     env._dispatch_vm_queue(0)
-    assert [(row.start_time, row.end_time) for row in env._records] == [(20.0, 30.0)]
+    assert [(row.start_time, row.end_time) for row in env._records] == [(20.0, 34.0)]
     drain(env)
-    assert env.wf_finish_time[0] == 30.0
+    assert env.wf_finish_time[0] == 34.0
 
 
-def test_sequencing_sees_only_arrived_tasks_and_idle_arrival_starts_directly():
+def test_sequencing_chooses_vm_service_and_idle_routing_starts_directly():
     env = environment((2, 4, 20), (1, 8, 2), (0, 0, 0))
     env.vm_available_at[0] = 10.0
     for scenario in env.shadow_vm_available_at:
@@ -98,16 +94,17 @@ def test_sequencing_sees_only_arrived_tasks_and_idle_arrival_starts_directly():
     env.vm_queue_selector = selector
     for task in range(3):
         env.route_task_to_vm(task, 0)
-    env.current_time = 4.0
-    env._process_finish_events_at_current_time()
-    assert env.vm_waiting_queues[0] == [0, 1]
-    assert env.task_state[2] == "Transferring"
+    assert env.vm_waiting_queues[0] == [0, 1, 2]
     env.current_time = 10.0
     env._dispatch_vm_queue(0)
-    assert seen == [(0, 1)]
     drain(env)
-    assert [row["task_id"] for row in env.assignment_history] == [1, 0, 2]
-    assert seen == [(0, 1), (0,)]  # Task 2 reaches an idle VM and bypasses sequencing.
+    assert [row["task_id"] for row in env.assignment_history] == [1, 2, 0]
+    assert seen == [(0, 1, 2), (0, 2), (0,)]
+    assert [(row.start_time, row.end_time) for row in env._records] == [(10, 22), (22, 44), (44, 47)]
+    idle = environment()
+    idle.vm_queue_selector = lambda *args: pytest.fail("idle task must start directly")
+    idle.route_task_to_vm(0, 0)
+    assert idle._records[0].start_time == 0.0
 
 
 def test_shared_physics_and_metrics_match_for_identical_schedule():
@@ -128,19 +125,19 @@ def test_shared_physics_and_metrics_match_for_identical_schedule():
                   "fuzzy_energy_mean", "fuzzy_energy_std", "fuzzy_energy_score", "evaluation_completed"):
         assert canonical[field] == comparison[field]
     assert aggregate_seed_metrics([comparison])["fuzzy_energy_score"] == aggregate_safe_metric_records([canonical])["fuzzy_energy_score"]
-    old = dict(canonical, communication_model_version="legacy_combined_v0")
+    old = dict(canonical, communication_model_version="input_transfer_then_compute_output_v1")
     with pytest.raises(ValueError, match="different communication models"):
         aggregate_safe_metric_records([canonical, old])
 
 
-def test_terminal_wait_is_time_since_input_arrival():
+def test_terminal_wait_is_time_since_vm_queue_entry():
     env = environment()
     env.vm_available_at[0] = 20.0
     env.route_task_to_vm(0, 0)
     env.current_time = 10.0
     env._process_finish_events_at_current_time()
     values = dict(zip(TERMINALS, task_terminals(env, 0, 0)))
-    assert values["TWT"] == 6.0
+    assert values["TWT"] == 10.0
     assert values["NIQ"] == 1
     assert values["WIQ"] == 8.0
     assert values["TTIQ"] == 14.0

@@ -5,18 +5,21 @@ project's fixed workflow data, resources, fuzzy uncertainty and DDL/energy
 objective. It does not run RL, LLM, Niching-GP, a shield, fallback, safety-value
 learning or demonstration pretraining.
 
-The routing tree assigns each newly ready task to a feasible VM, including busy
-VMs. Input transfer completes before the task can enter that VM's waiting queue.
-An arrival at an idle VM starts immediately, without running the sequencing
-tree. At completion, the sequencing tree selects the next already-arrived task
-from that VM's queue. Mapping is irreversible and execution is non-preemptive.
-Computation plus output transfer occupy the VM; input transfer does not. All
-methods use the shared `common/scheduling_transport.py` timing formula and the
-production HRL environment. Existing HRL policies retain their advance booking
-of a selected VM; this is a policy reservation, not input-transfer CPU load.
+This branch restores the project's original combined VM service model:
+input transfer + computation + output transfer occupy the selected VM together.
+Input waits for VM availability and cannot overlap that VM's previous service.
+The shared timing formula and production evaluator apply to every method.
+
+The routing tree irreversibly maps a ready task to a feasible VM's logical
+waiting queue. An idle VM starts it immediately; after completion the sequencing
+tree selects the next task from that VM's queue. A selected task begins input
+transfer only after selection and keeps the VM until output completion.
+Queue admission therefore precedes input transfer in this restored-model
+adaptation. The staged branch and its upload-before-queue cooperation are
+preserved separately; these two physical models must not share artifacts.
 
 The original ten terminals retain their meanings. UT/DT are named
-IN_COMM/OUT_COMM, TWT starts at VM arrival, WIQ is queued computation time,
+IN_COMM/OUT_COMM, TWT starts at logical VM queue admission, WIQ is queued computation time,
 TTIQ is queued input/computation/output time, and MRT is an absolute availability
 time. TIME_TO_DDL and DELTA_FUZZY_ENERGY extend the common terminal set for the
 new objective. Features are not clipped or normalized. No future arrival or
@@ -63,7 +66,7 @@ Formal Single cache overrides use the same complete source/target mapping as
 the existing comparison runners, for example `--deadline-cache SS=...`
 `--deadline-cache MS=... --deadline-cache LS=...`.
 
-Outputs are isolated under `out/comparisons/mtgp/transport_v1/`. `rules.json`
+Outputs are isolated under `out/comparisons/mtgp/combined_v1/`. `rules.json`
 contains the tree pair, protocol/model/input/source hashes, validation result
 and GP budget. `history.json` records generation training fitness. `eval.json`
 and `eval.csv` contain frozen final-test metrics. To evaluate again, provide
@@ -121,7 +124,7 @@ recorded separately. They do not change the frozen training settings or RNG.
 values, full assignment/shadow timelines, serial/parallel selection and an
 interrupted run resumed with a different worker count.
 
-See `docs/STAGED_COMMUNICATION.md` for the shared physical-model change and
+See `docs/ORIGINAL_COMMUNICATION.md` for the shared physical-model change and
 the treatment of historical checkpoints and fixed deadline inputs.
 
 Upstream: https://github.com/MengBIT/Fog-Computing/tree/multiDeviceDebug

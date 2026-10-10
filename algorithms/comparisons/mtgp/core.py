@@ -1,4 +1,4 @@
-"""Routing before transfer, sequencing after arrival; no RL or LLM policies."""
+"""Routing to per-VM queues, sequencing combined service; no RL or LLM policies."""
 
 from dataclasses import dataclass
 from functools import lru_cache

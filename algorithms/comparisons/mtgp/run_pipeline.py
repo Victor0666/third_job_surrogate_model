@@ -99,7 +99,7 @@ def main(argv=None):
                            validation_seeds=(101,), test_seeds=(201,),
                            test_scenarios=(protocol.scenario,))
     group = context.source_scenario if args.protocol == "single" else context.resource_scale
-    output = args.output or (PROJECT_ROOT / "out" / "comparisons" / "mtgp" / "transport_v1"
+    output = args.output or (PROJECT_ROOT / "out" / "comparisons" / "mtgp" / "combined_v1"
                             / ("smoke" if args.smoke else args.protocol) / group
                             / f"{args.ddl}_a{args.algorithm_seed}")
     output = output.resolve()

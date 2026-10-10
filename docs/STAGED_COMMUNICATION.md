@@ -1,5 +1,8 @@
 # Shared staged communication model
 
+Historical model preserved on `codex/energy-only-llm-20261008` at `f83da5b`.
+The current branch restores combined service; see `ORIGINAL_COMMUNICATION.md`.
+
 Model identifier: `input_transfer_then_compute_output_v1`.
 
 The former model started a VM load record at routing and occupied it for input

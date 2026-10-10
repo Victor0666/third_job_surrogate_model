@@ -343,7 +343,7 @@
         "strict_ddl_feasibility_without_llm"
       ]
     },
-    "communication_model_version": "input_transfer_then_compute_output_v1"
+    "communication_model_version": "combined_input_compute_output_v1"
   },
   "information_contracts": {
     "legacy_hrl": {
@@ -497,7 +497,7 @@
     },
     "mtgp": {
       "manager_inputs": [
-        "arrived_vm_queue_mtgp12_features"
+        "vm_queue_mtgp12_features"
       ],
       "host_inputs": [],
       "vm_inputs": [
@@ -924,13 +924,13 @@
     },
     {
       "method_id": "mtgp",
-      "description": "MTGP jointly evolves routing and sequencing trees; sequencing acts only after input transfer reaches a VM.",
+      "description": "MTGP jointly evolves routing and sequencing trees; sequencing selects the next VM service including input, compute and output.",
       "execution_adapter": "mtgp_pipeline",
       "output_namespace": "mtgp",
       "components": {
         "policy_family": "mtgp",
-        "manager_policy": "gp_arrived_vm_queue_sequencing",
-        "manager_observation": "arrived_vm_queue_mtgp12_features",
+        "manager_policy": "gp_vm_queue_sequencing",
+        "manager_observation": "vm_queue_mtgp12_features",
         "task_ordering": "gp_per_vm_queue",
         "heuristic_candidate_set": "one_frozen_tree_pair",
         "fixed_heuristic_id": null,
@@ -945,7 +945,7 @@
         "safety_shield": false,
         "task_level_safety_deadline": false,
         "fallback_controller": false,
-        "empty_safe_action_behavior": "feasible_vm_routing_then_arrived_queue_dispatch",
+        "empty_safe_action_behavior": "feasible_vm_routing_then_queue_dispatch",
         "lagrange_mode": "none",
         "lambda_value": null,
         "demonstration_pretraining": false,

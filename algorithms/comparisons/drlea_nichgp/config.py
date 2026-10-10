@@ -180,7 +180,7 @@ class ComparisonConfig:
             parent = "main_single" if self.protocol == "single" else "enhancement_multi"
             group = self.source_scenario if self.protocol == "single" else self.resource_scale
             namespace = Path(parent) / str(group) / f"{short_ddl}_a{self.algorithm_seed}"
-        return PROJECT_ROOT / "out" / "comparisons" / METHOD_ID / "transport_v1" / namespace
+        return PROJECT_ROOT / "out" / "comparisons" / METHOD_ID / "combined_v1" / namespace
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

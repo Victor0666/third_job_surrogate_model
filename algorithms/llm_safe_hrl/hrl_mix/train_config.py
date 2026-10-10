@@ -1112,7 +1112,7 @@ def build_train_config(
             + f":energy_scale={float(safe_rl_energy_reward_scale):.17g}:energy_relative_v1"
             + ":monitor_only:actual_deadline_violation",
         )
-    run_name += "-tx1"
+    run_name += "-cmb1"
     if protocol_context is None:
         output_paths = training_output_paths(ROOT_DIR, run_name)
         save_dir = output_paths.checkpoint_dir

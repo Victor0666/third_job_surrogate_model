@@ -1866,57 +1866,75 @@ class HrlHeftEnv(gym.Env):
             )["total_duration"]
         )
 
-    def _input_arrival_scenario(self, task_id, vm_index, scenario):
-        vm_id = self.vm_ids[vm_index]
-        transfer = getattr(self, "_input_transfers", {}).get(task_id)
-        if transfer is not None and transfer["vm_index"] == vm_index:
-            return transfer["arrivals"][scenario]
+    def _task_start_time_scenario(self, task_id, vm_index, scenario) -> float:
+        """按固定映射重放规则计算任务在某个场景中的开始时刻。"""
+        task_id = self._task_id(task_id)
         wf_id, _ = self.task_meta[task_id]
-        arrival = float(self.workflows[wf_id].arrival_time)
+        arrival_time = float(self.workflows[wf_id].arrival_time)
         parents = self.task_global_parents[task_id]
-        ends = self.task_end_time if scenario == "modal" else self.shadow_task_end_time[scenario]
-        ready = max([arrival, *(float(ends[parent]) for parent in parents)])
-        modal_ready = max([arrival, *(float(self.task_end_time[parent]) for parent in parents)])
-        # Preserve policy waiting; input transfer never waits for VM availability.
-        route = ready + max(0.0, float(self.current_time) - modal_ready)
-        return route + self.estimate_task_duration_components_scenario(
-            task_id, vm_id, scenario
-        )["input_communication_time"]
+
+        if scenario == "modal":
+            vm_available = float(self.vm_available_at[vm_index])
+            parent_finish = max(
+                (float(self.task_end_time[parent_id]) for parent_id in parents),
+                default=arrival_time,
+            )
+            # modal 事件驱动环境只会在任务 ready 后做预测；current_time 因而同时
+            # 包含到达和父任务完成约束，保留它可与旧预测逻辑完全一致。
+            return float(
+                max(
+                    float(self.current_time),
+                    arrival_time,
+                    vm_available,
+                    parent_finish,
+                )
+            )
+
+        if scenario not in {"optimistic", "pessimistic"}:
+            raise ValueError(
+                "scenario must be 'optimistic', 'modal', or 'pessimistic'"
+            )
+        vm_available = float(self.shadow_vm_available_at[scenario][vm_index])
+        parent_finish = max(
+            (
+                float(self.shadow_task_end_time[scenario][parent_id])
+                for parent_id in parents
+            ),
+            default=arrival_time,
+        )
+        return float(max(arrival_time, vm_available, parent_finish))
 
     def _task_execution_window_scenario(self, task_id, vm_index, scenario):
         vm_id = self.vm_ids[vm_index]
-        components = self.estimate_task_duration_components_scenario(task_id, vm_id, scenario)
-        available = self.vm_available_at if scenario == "modal" else self.shadow_vm_available_at[scenario]
-        arrival = self._input_arrival_scenario(task_id, vm_index, scenario)
-        modal_start = max(
-            self._input_arrival_scenario(task_id, vm_index, "modal"),
-            float(self.vm_available_at[vm_index]),
-        )
-        defer = max(0.0, float(self.current_time) - modal_start)
-        _, start, end = execution_window(
-            arrival, 0.0, available[vm_index],
+        components = self._task_duration_components_ref(task_id, vm_id, scenario)
+        start = self._task_start_time_scenario(task_id, vm_index, scenario)
+        return execution_window(
+            start, components["input_communication_time"], start,
             components["execution_time"], components["output_communication_time"],
         )
-        return arrival, start + defer, end + defer
 
     def route_task_to_vm(self, task, vm):
-        """Transfer first; only arrived tasks may enter a VM's sequencing queue."""
+        """Route to a VM queue; selected input/compute/output occupy it together."""
         task_id = self._task_id(task)
         vm_id, vm_index = self._vm_id_and_index(vm)
         if self.task_state[task_id] != "Ready" or task_id not in self.ready_task_ids:
             raise ValueError(f"Task {task_id} is not ready for routing")
         if vm_id not in self.get_feasible_vms(task_id):
             raise NoFeasibleVMError(f"VM {vm_id} is infeasible for task {task_id}")
-        arrivals = {scenario: self._input_arrival_scenario(task_id, vm_index, scenario)
-                    for scenario in ("optimistic", "modal", "pessimistic")}
         self._input_transfers[task_id] = {
-            "vm_index": vm_index, "arrivals": arrivals, "route_time": float(self.current_time),
+            "vm_index": vm_index, "arrivals": {name: float(self.current_time)
+                for name in ("optimistic", "modal", "pessimistic")},
+            "route_time": float(self.current_time),
         }
-        self.task_state[task_id] = "Transferring"
+        self.task_state[task_id] = "Queued"
         wf_id, local_id = self.task_meta[task_id]
-        self.workflows[wf_id].tasks[local_id].state = "Transferring"
+        self.workflows[wf_id].tasks[local_id].state = "Queued"
         self.ready_task_ids.remove(task_id)
-        heapq.heappush(self.event_heap, (arrivals["modal"], "input", task_id, vm_index))
+        if not self.vm_waiting_queues[vm_index] and self.vm_available_at[vm_index] <= self.current_time + 1e-12:
+            self._assign_task_to_specific_vm(task_id, vm_index)
+        else:
+            self.vm_waiting_queues[vm_index].append(task_id)
+            self._dispatch_vm_queue(vm_index)
         self._mark_safety_state_changed()
 
     def _dispatch_vm_queue(self, vm_index):
@@ -6259,17 +6277,6 @@ class HrlHeftEnv(gym.Env):
         processed_finish = False
         while len(self.event_heap) > 0 and self.event_heap[0][0] <= self.current_time + 1e-12:
             _, etype, task_id, vm_idx = heapq.heappop(self.event_heap)
-            if etype == "input":
-                self.task_state[task_id] = "Queued"
-                wf_id, local_id = self.task_meta[task_id]
-                self.workflows[wf_id].tasks[local_id].state = "Queued"
-                if not self.vm_waiting_queues[vm_idx] and self.vm_available_at[vm_idx] <= self.current_time + 1e-12:
-                    self._assign_task_to_specific_vm(task_id, vm_idx)
-                else:
-                    self.vm_waiting_queues[vm_idx].append(task_id)
-                    self._dispatch_vm_queue(vm_idx)
-                self._mark_safety_state_changed()
-                continue
             if etype == "start":
                 if self.task_state[task_id] == "Finished":
                     continue
@@ -6277,13 +6284,6 @@ class HrlHeftEnv(gym.Env):
                 wf_id, local_id = self.task_meta[task_id]
                 self.workflows[wf_id].tasks[local_id].state = "Running"
                 self._mark_safety_state_changed()
-                continue
-            if etype == "input_reserved":
-                if self.task_state[task_id] != "Finished":
-                    self.task_state[task_id] = "Queued"
-                    wf_id, local_id = self.task_meta[task_id]
-                    self.workflows[wf_id].tasks[local_id].state = "Queued"
-                    self._mark_safety_state_changed()
                 continue
             if etype != "finish":
                 continue
@@ -6896,7 +6896,7 @@ class HrlHeftEnv(gym.Env):
     def _assign_task_to_specific_vm(self, task_id, vm_index):
         """提交任务到指定 VM，并在启用模糊模式时同步写入两个影子时间线。
 
-        modal 输入到达、启动和完成事件驱动时钟；optimistic 与 pessimistic
+        modal 全程服务启动和完成事件驱动时钟；optimistic 与 pessimistic
         按相同任务顺序和 VM 映射重放，不影响实际候选集合。
         """
         vm_id = self.vm_ids[vm_index]
@@ -6908,23 +6908,12 @@ class HrlHeftEnv(gym.Env):
             for scenario in ("optimistic", "modal", "pessimistic")
         }
         input_arrival, start_time, end_time = windows["modal"]
-        if task_id not in self._input_transfers:
-            self._input_transfers[task_id] = {
-                "vm_index": vm_index, "route_time": float(now),
-                "arrivals": {scenario: window[0] for scenario, window in windows.items()},
-            }
-
-        self.task_state[task_id] = (
-            "Transferring" if input_arrival > now + 1e-12
-            else "Queued" if start_time > now + 1e-12 else "Running"
-        )
+        self.task_state[task_id] = "Running" if start_time <= now + 1e-12 else "Queued"
         self.task_end_time[task_id] = end_time
         self.vm_available_at[vm_index] = end_time
         if task_id in self.ready_task_ids:
             self.ready_task_ids.remove(task_id)
         heapq.heappush(self.event_heap, (end_time, "finish", task_id, vm_index))
-        if input_arrival > now + 1e-12:
-            heapq.heappush(self.event_heap, (input_arrival, "input_reserved", task_id, vm_index))
         if start_time > now + 1e-12:
             heapq.heappush(self.event_heap, (start_time, "start", task_id, vm_index))
 

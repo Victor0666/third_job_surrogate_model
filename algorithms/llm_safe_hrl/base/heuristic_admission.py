@@ -29,8 +29,8 @@ except ModuleNotFoundError:  # Package-style imports used by some test runners.
 
 ADMISSION_MANIFEST_SCHEMA_VERSION = 3
 ADMISSION_RECORD_SCHEMA_VERSION = 2
-# v4 splits input transfer from VM execution; old admission results must be re-evaluated.
-CEWS_EVALUATOR_PROTOCOL_VERSION = 4
+# v5 restores combined VM service; staged-model admission must be re-evaluated.
+CEWS_EVALUATOR_PROTOCOL_VERSION = 5
 DEFAULT_MANIFEST_ID = "cews_safe_manager_heuristics"
 DEFAULT_MANIFEST_VERSION = "2026-07-31.resource-domain.v1"
 DEFAULT_TRUSTED_SOURCE_ROOT = "generated"
