@@ -142,8 +142,8 @@ def make_environment(
     kwargs = protocol.environment_kwargs(int(seed))
     kwargs.update(
         {
-            "ddl_reward_fraction": float(reward.get("ddl_fraction", 0.75)),
-            "energy_reward_fraction": float(reward.get("energy_fraction", 0.25)),
+            "ddl_reward_fraction": float(reward.get("ddl_fraction", 0.95)),
+            "energy_reward_fraction": float(reward.get("energy_fraction", 0.05)),
             "comparison_energy_scale": float(reward.get("energy_scale", 1e-3)),
             "comparison_tardiness_normalizer": float(
                 reward.get("tardiness_normalizer", 300.0)

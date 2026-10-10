@@ -96,8 +96,8 @@
     "max_assignment_steps": 1000000
   },
   "reward": {
-    "ddl_fraction": 0.75,
-    "energy_fraction": 0.25,
+    "ddl_fraction": 0.95,
+    "energy_fraction": 0.05,
     "energy_scale": 0.001,
     "tardiness_normalizer": 300.0
   },

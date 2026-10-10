@@ -70,8 +70,8 @@ class FuzzyBaselineEnv(HrlFcfsCacheEnv):
     def __init__(
         self,
         *args,
-        ddl_reward_fraction: float = 0.75,
-        energy_reward_fraction: float = 0.25,
+        ddl_reward_fraction: float = 0.95,
+        energy_reward_fraction: float = 0.05,
         comparison_energy_scale: float = 1e-3,
         comparison_tardiness_normalizer: float = 300.0,
         **kwargs,
