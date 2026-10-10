@@ -1,4 +1,4 @@
-MTGP 新服务器更新与覆盖 9 情景的训练命令（Linux / Bash）
+MTGP 新服务器更新与 9 个独立训练任务命令（Linux / Bash）
 日期：2026-10-10
 仓库：https://github.com/Victor0666/third_job_surrogate_model.git
 分支：codex/energy-only-llm-20261008
@@ -32,74 +32,86 @@ python -m pip install torch==2.5.1 --index-url https://download.pytorch.org/whl/
 python -m pytest tests/test_mtgp_transport.py tests/test_mtgp_acceleration.py -q
 python -m algorithms.comparisons.mtgp.run_pipeline --smoke --workers 4 --threads-per-worker 1 --output out/comparisons/mtgp/server_smoke
 
-四、正式训练公共参数（每个新终端先执行本节，再执行第五节）
-默认：Single 协议、Tight（T）、算法随机种子 0、8 个 CPU 进程。
-9 情景：SS、SM、SL、MS、MM、ML、LS、LM、LL；第一位是任务规模，第二位是资源规模。
-严格沿用现有 Single 协议：只训练 SS、SM、SL 三个源模型，覆盖全部 9 个评测情景。
+四、9 个任务的定义与运行方式
+SS、SM、SL x T、M、L = 9 个独立训练任务；默认算法种子 0。
 SS 模型评测 SS/MS/LS；SM 模型评测 SM/MM/LM；SL 模型评测 SL/ML/LL。
-现有 Single 不允许 MS/MM/ML/LS/LM/LL 作为训练源，不提供会报错的训练命令。
-若研究目标是 9 情景各自独立训练，则需要另行明确训练协议，所有方法保持相同训练范围。
-种群 1000、51 代、10 个精英；训练环境种子 1-5、验证 101-103、最终测试 201-230。
-每回合 50 个工作流。训练结束后自动选择规则并执行最终评测，无需另写评测命令。
+Single 协议、两棵树协作方式、共享评测函数及训练/验证/测试种子保持不变。
+种群 1000、51 代、10 个精英；训练种子 1-5、验证 101-103、最终测试 201-230。
+每回合 50 个工作流，训练后自动验证选模并执行最终评测。
 
-这些命令显式使用 scenario_registry 的正式默认 exact_mix_v1 DDL 缓存。
-比较方法必须使用同一组缓存。如果你的 LLM-safe-HRL 实验显式使用了 diagnostic
-目录下的 fcfs_fixed_XX_exactmix_formal38.json，请将下面所有对应路径一并替换成
-那组缓存；不能只为 MTGP 更换缓存，也不要在训练中途重新生成或替换缓存。
+每条命令均完整展开参数，不需要设置 DDL、ALG_SEED、WORKERS 或 CACHES 变量。
+在每个终端进入项目根目录并激活环境，然后复制对应的一条命令。
+可分配到不同终端或不同服务器运行；不要在同一共享输出目录重复启动同一个任务。
+默认每个任务 --workers 4 --threads-per-worker 1。9 个同时启动是 36 个工作进程，
+另有主进程；请按服务器 CPU 和内存调整 --workers 或同时运行的任务数量。
+如果希望保留原来的每任务 8 进程，将对应命令中的 --workers 4 改为 --workers 8。
+Worker 数量可以改变，算法随机数、训练范围及评测逻辑不变。
 
-DDL=T
-ALG_SEED=0
-WORKERS=8
-CACHES=(
-  --deadline-cache SS=data/deadlines/fcfs/exact_mix_v1/fcfs_smallTask_smallRes_exactmix_formal38.json
-  --deadline-cache SM=data/deadlines/fcfs/exact_mix_v1/fcfs_smallTask_medRes_exactmix_formal38.json
-  --deadline-cache SL=data/deadlines/fcfs/exact_mix_v1/fcfs_smallTask_largeRes_exactmix_formal38.json
-  --deadline-cache MS=data/deadlines/fcfs/exact_mix_v1/fcfs_medTask_smallRes_exactmix_formal38.json
-  --deadline-cache MM=data/deadlines/fcfs/exact_mix_v1/fcfs_medTask_medRes_exactmix_formal38.json
-  --deadline-cache ML=data/deadlines/fcfs/exact_mix_v1/fcfs_medTask_largeRes_exactmix_formal38.json
-  --deadline-cache LS=data/deadlines/fcfs/exact_mix_v1/fcfs_largeTask_smallRes_exactmix_formal38.json
-  --deadline-cache LM=data/deadlines/fcfs/exact_mix_v1/fcfs_largeTask_medRes_exactmix_formal38.json
-  --deadline-cache LL=data/deadlines/fcfs/exact_mix_v1/fcfs_largeTask_largeRes_exactmix_formal38.json
-)
+每个新终端执行（如项目路径不同，请替换第一行）：
+cd "$HOME/lyz/zCPU3/third_job_surrogate_model"
+conda activate third_work_py311
 
-五、覆盖 9 个情景的三个源模型训练命令
-以下命令默认依次运行；每个模型训练后自动评测对应的三个情景。
+上面的路径/环境名来自当前服务器；首次下载到默认目录时则执行：
+cd "$HOME/third_job_surrogate_model"
+source .venv/bin/activate
 
-# SS
-python -m algorithms.comparisons.mtgp.run_pipeline --protocol single --scenario SS --ddl "$DDL" --algorithm-seed "$ALG_SEED" --workers "$WORKERS" --threads-per-worker 1 "${CACHES[@]}"
+下面继续显式使用原命令的全部 9 个 exact_mix_v1 DDL 缓存映射，便于原训练断点恢复。
+各比较方法必须使用同一组缓存。如原实验用 diagnostic/fcfs_fixed_XX_exactmix_formal38.json，
+请将所有对应路径改成原实验的那组缓存，不要只替换 MTGP。
 
-# SM
-python -m algorithms.comparisons.mtgp.run_pipeline --protocol single --scenario SM --ddl "$DDL" --algorithm-seed "$ALG_SEED" --workers "$WORKERS" --threads-per-worker 1 "${CACHES[@]}"
+五、9 条独立训练命令（任选对应任务，每条单独启动；没有串行循环）
 
-# SL
-python -m algorithms.comparisons.mtgp.run_pipeline --protocol single --scenario SL --ddl "$DDL" --algorithm-seed "$ALG_SEED" --workers "$WORKERS" --threads-per-worker 1 "${CACHES[@]}"
+# SS_T，输出：out/comparisons/mtgp/transport_v1/single/SS/T_a0/
+python -m algorithms.comparisons.mtgp.run_pipeline --protocol single --scenario SS --ddl T --algorithm-seed 0 --workers 4 --threads-per-worker 1 --deadline-cache SS=data/deadlines/fcfs/exact_mix_v1/fcfs_smallTask_smallRes_exactmix_formal38.json --deadline-cache SM=data/deadlines/fcfs/exact_mix_v1/fcfs_smallTask_medRes_exactmix_formal38.json --deadline-cache SL=data/deadlines/fcfs/exact_mix_v1/fcfs_smallTask_largeRes_exactmix_formal38.json --deadline-cache MS=data/deadlines/fcfs/exact_mix_v1/fcfs_medTask_smallRes_exactmix_formal38.json --deadline-cache MM=data/deadlines/fcfs/exact_mix_v1/fcfs_medTask_medRes_exactmix_formal38.json --deadline-cache ML=data/deadlines/fcfs/exact_mix_v1/fcfs_medTask_largeRes_exactmix_formal38.json --deadline-cache LS=data/deadlines/fcfs/exact_mix_v1/fcfs_largeTask_smallRes_exactmix_formal38.json --deadline-cache LM=data/deadlines/fcfs/exact_mix_v1/fcfs_largeTask_medRes_exactmix_formal38.json --deadline-cache LL=data/deadlines/fcfs/exact_mix_v1/fcfs_largeTask_largeRes_exactmix_formal38.json
 
-六、可选：用循环依次训练并覆盖 9 情景（与第五节任选一种，不要重复执行）
+# SS_M，输出：out/comparisons/mtgp/transport_v1/single/SS/M_a0/
+python -m algorithms.comparisons.mtgp.run_pipeline --protocol single --scenario SS --ddl M --algorithm-seed 0 --workers 4 --threads-per-worker 1 --deadline-cache SS=data/deadlines/fcfs/exact_mix_v1/fcfs_smallTask_smallRes_exactmix_formal38.json --deadline-cache SM=data/deadlines/fcfs/exact_mix_v1/fcfs_smallTask_medRes_exactmix_formal38.json --deadline-cache SL=data/deadlines/fcfs/exact_mix_v1/fcfs_smallTask_largeRes_exactmix_formal38.json --deadline-cache MS=data/deadlines/fcfs/exact_mix_v1/fcfs_medTask_smallRes_exactmix_formal38.json --deadline-cache MM=data/deadlines/fcfs/exact_mix_v1/fcfs_medTask_medRes_exactmix_formal38.json --deadline-cache ML=data/deadlines/fcfs/exact_mix_v1/fcfs_medTask_largeRes_exactmix_formal38.json --deadline-cache LS=data/deadlines/fcfs/exact_mix_v1/fcfs_largeTask_smallRes_exactmix_formal38.json --deadline-cache LM=data/deadlines/fcfs/exact_mix_v1/fcfs_largeTask_medRes_exactmix_formal38.json --deadline-cache LL=data/deadlines/fcfs/exact_mix_v1/fcfs_largeTask_largeRes_exactmix_formal38.json
 
-for SCENARIO in SS SM SL; do
-  python -m algorithms.comparisons.mtgp.run_pipeline --protocol single --scenario "$SCENARIO" --ddl "$DDL" --algorithm-seed "$ALG_SEED" --workers "$WORKERS" --threads-per-worker 1 "${CACHES[@]}" || break
-done
+# SS_L，输出：out/comparisons/mtgp/transport_v1/single/SS/L_a0/
+python -m algorithms.comparisons.mtgp.run_pipeline --protocol single --scenario SS --ddl L --algorithm-seed 0 --workers 4 --threads-per-worker 1 --deadline-cache SS=data/deadlines/fcfs/exact_mix_v1/fcfs_smallTask_smallRes_exactmix_formal38.json --deadline-cache SM=data/deadlines/fcfs/exact_mix_v1/fcfs_smallTask_medRes_exactmix_formal38.json --deadline-cache SL=data/deadlines/fcfs/exact_mix_v1/fcfs_smallTask_largeRes_exactmix_formal38.json --deadline-cache MS=data/deadlines/fcfs/exact_mix_v1/fcfs_medTask_smallRes_exactmix_formal38.json --deadline-cache MM=data/deadlines/fcfs/exact_mix_v1/fcfs_medTask_medRes_exactmix_formal38.json --deadline-cache ML=data/deadlines/fcfs/exact_mix_v1/fcfs_medTask_largeRes_exactmix_formal38.json --deadline-cache LS=data/deadlines/fcfs/exact_mix_v1/fcfs_largeTask_smallRes_exactmix_formal38.json --deadline-cache LM=data/deadlines/fcfs/exact_mix_v1/fcfs_largeTask_medRes_exactmix_formal38.json --deadline-cache LL=data/deadlines/fcfs/exact_mix_v1/fcfs_largeTask_largeRes_exactmix_formal38.json
 
-如需另外两种 DDL，先改 DDL=M 或 DDL=L，再运行第五节或第六节。
-3 个源模型 x 3 种 DDL = 9 次独立训练，覆盖 9 情景 x 3 种 DDL 的 27 组评测。
-这与 Multi 协议不同；Multi 在同资源规模的三个任务情景上联合训练。
-如需多个算法种子，分别设置 ALG_SEED=0、1、2 等，每个种子独立训练。
+# SM_T，输出：out/comparisons/mtgp/transport_v1/single/SM/T_a0/
+python -m algorithms.comparisons.mtgp.run_pipeline --protocol single --scenario SM --ddl T --algorithm-seed 0 --workers 4 --threads-per-worker 1 --deadline-cache SS=data/deadlines/fcfs/exact_mix_v1/fcfs_smallTask_smallRes_exactmix_formal38.json --deadline-cache SM=data/deadlines/fcfs/exact_mix_v1/fcfs_smallTask_medRes_exactmix_formal38.json --deadline-cache SL=data/deadlines/fcfs/exact_mix_v1/fcfs_smallTask_largeRes_exactmix_formal38.json --deadline-cache MS=data/deadlines/fcfs/exact_mix_v1/fcfs_medTask_smallRes_exactmix_formal38.json --deadline-cache MM=data/deadlines/fcfs/exact_mix_v1/fcfs_medTask_medRes_exactmix_formal38.json --deadline-cache ML=data/deadlines/fcfs/exact_mix_v1/fcfs_medTask_largeRes_exactmix_formal38.json --deadline-cache LS=data/deadlines/fcfs/exact_mix_v1/fcfs_largeTask_smallRes_exactmix_formal38.json --deadline-cache LM=data/deadlines/fcfs/exact_mix_v1/fcfs_largeTask_medRes_exactmix_formal38.json --deadline-cache LL=data/deadlines/fcfs/exact_mix_v1/fcfs_largeTask_largeRes_exactmix_formal38.json
 
-七、断点恢复（以 SS 为例，其他情景替换 --scenario 即可）
-先执行第四节，保持原来的 DDL、ALG_SEED、缓存及输出目录，然后追加 --resume。
-WORKERS 可以改变。每代保存一次，中断时未完成的那一代会重新计算。
-源代码、输入文件、Python/NumPy 版本变化会拒绝恢复；不要直接迁移 Windows 断点到 Linux。
-规则已选好时，--resume 只重跑冻结最终评测，不重新演化。
+# SM_M，输出：out/comparisons/mtgp/transport_v1/single/SM/M_a0/
+python -m algorithms.comparisons.mtgp.run_pipeline --protocol single --scenario SM --ddl M --algorithm-seed 0 --workers 4 --threads-per-worker 1 --deadline-cache SS=data/deadlines/fcfs/exact_mix_v1/fcfs_smallTask_smallRes_exactmix_formal38.json --deadline-cache SM=data/deadlines/fcfs/exact_mix_v1/fcfs_smallTask_medRes_exactmix_formal38.json --deadline-cache SL=data/deadlines/fcfs/exact_mix_v1/fcfs_smallTask_largeRes_exactmix_formal38.json --deadline-cache MS=data/deadlines/fcfs/exact_mix_v1/fcfs_medTask_smallRes_exactmix_formal38.json --deadline-cache MM=data/deadlines/fcfs/exact_mix_v1/fcfs_medTask_medRes_exactmix_formal38.json --deadline-cache ML=data/deadlines/fcfs/exact_mix_v1/fcfs_medTask_largeRes_exactmix_formal38.json --deadline-cache LS=data/deadlines/fcfs/exact_mix_v1/fcfs_largeTask_smallRes_exactmix_formal38.json --deadline-cache LM=data/deadlines/fcfs/exact_mix_v1/fcfs_largeTask_medRes_exactmix_formal38.json --deadline-cache LL=data/deadlines/fcfs/exact_mix_v1/fcfs_largeTask_largeRes_exactmix_formal38.json
 
-python -m algorithms.comparisons.mtgp.run_pipeline --protocol single --scenario SS --ddl "$DDL" --algorithm-seed "$ALG_SEED" --workers "$WORKERS" --threads-per-worker 1 "${CACHES[@]}" --resume
+# SM_L，输出：out/comparisons/mtgp/transport_v1/single/SM/L_a0/
+python -m algorithms.comparisons.mtgp.run_pipeline --protocol single --scenario SM --ddl L --algorithm-seed 0 --workers 4 --threads-per-worker 1 --deadline-cache SS=data/deadlines/fcfs/exact_mix_v1/fcfs_smallTask_smallRes_exactmix_formal38.json --deadline-cache SM=data/deadlines/fcfs/exact_mix_v1/fcfs_smallTask_medRes_exactmix_formal38.json --deadline-cache SL=data/deadlines/fcfs/exact_mix_v1/fcfs_smallTask_largeRes_exactmix_formal38.json --deadline-cache MS=data/deadlines/fcfs/exact_mix_v1/fcfs_medTask_smallRes_exactmix_formal38.json --deadline-cache MM=data/deadlines/fcfs/exact_mix_v1/fcfs_medTask_medRes_exactmix_formal38.json --deadline-cache ML=data/deadlines/fcfs/exact_mix_v1/fcfs_medTask_largeRes_exactmix_formal38.json --deadline-cache LS=data/deadlines/fcfs/exact_mix_v1/fcfs_largeTask_smallRes_exactmix_formal38.json --deadline-cache LM=data/deadlines/fcfs/exact_mix_v1/fcfs_largeTask_medRes_exactmix_formal38.json --deadline-cache LL=data/deadlines/fcfs/exact_mix_v1/fcfs_largeTask_largeRes_exactmix_formal38.json
 
-八、输出位置与公平性
-默认输出：out/comparisons/mtgp/transport_v1/single/<情景>/<DDL>_a<算法种子>/
-例如：out/comparisons/mtgp/transport_v1/single/SS/T_a0/
+# SL_T，输出：out/comparisons/mtgp/transport_v1/single/SL/T_a0/
+python -m algorithms.comparisons.mtgp.run_pipeline --protocol single --scenario SL --ddl T --algorithm-seed 0 --workers 4 --threads-per-worker 1 --deadline-cache SS=data/deadlines/fcfs/exact_mix_v1/fcfs_smallTask_smallRes_exactmix_formal38.json --deadline-cache SM=data/deadlines/fcfs/exact_mix_v1/fcfs_smallTask_medRes_exactmix_formal38.json --deadline-cache SL=data/deadlines/fcfs/exact_mix_v1/fcfs_smallTask_largeRes_exactmix_formal38.json --deadline-cache MS=data/deadlines/fcfs/exact_mix_v1/fcfs_medTask_smallRes_exactmix_formal38.json --deadline-cache MM=data/deadlines/fcfs/exact_mix_v1/fcfs_medTask_medRes_exactmix_formal38.json --deadline-cache ML=data/deadlines/fcfs/exact_mix_v1/fcfs_medTask_largeRes_exactmix_formal38.json --deadline-cache LS=data/deadlines/fcfs/exact_mix_v1/fcfs_largeTask_smallRes_exactmix_formal38.json --deadline-cache LM=data/deadlines/fcfs/exact_mix_v1/fcfs_largeTask_medRes_exactmix_formal38.json --deadline-cache LL=data/deadlines/fcfs/exact_mix_v1/fcfs_largeTask_largeRes_exactmix_formal38.json
+
+# SL_M，输出：out/comparisons/mtgp/transport_v1/single/SL/M_a0/
+python -m algorithms.comparisons.mtgp.run_pipeline --protocol single --scenario SL --ddl M --algorithm-seed 0 --workers 4 --threads-per-worker 1 --deadline-cache SS=data/deadlines/fcfs/exact_mix_v1/fcfs_smallTask_smallRes_exactmix_formal38.json --deadline-cache SM=data/deadlines/fcfs/exact_mix_v1/fcfs_smallTask_medRes_exactmix_formal38.json --deadline-cache SL=data/deadlines/fcfs/exact_mix_v1/fcfs_smallTask_largeRes_exactmix_formal38.json --deadline-cache MS=data/deadlines/fcfs/exact_mix_v1/fcfs_medTask_smallRes_exactmix_formal38.json --deadline-cache MM=data/deadlines/fcfs/exact_mix_v1/fcfs_medTask_medRes_exactmix_formal38.json --deadline-cache ML=data/deadlines/fcfs/exact_mix_v1/fcfs_medTask_largeRes_exactmix_formal38.json --deadline-cache LS=data/deadlines/fcfs/exact_mix_v1/fcfs_largeTask_smallRes_exactmix_formal38.json --deadline-cache LM=data/deadlines/fcfs/exact_mix_v1/fcfs_largeTask_medRes_exactmix_formal38.json --deadline-cache LL=data/deadlines/fcfs/exact_mix_v1/fcfs_largeTask_largeRes_exactmix_formal38.json
+
+# SL_L，输出：out/comparisons/mtgp/transport_v1/single/SL/L_a0/
+python -m algorithms.comparisons.mtgp.run_pipeline --protocol single --scenario SL --ddl L --algorithm-seed 0 --workers 4 --threads-per-worker 1 --deadline-cache SS=data/deadlines/fcfs/exact_mix_v1/fcfs_smallTask_smallRes_exactmix_formal38.json --deadline-cache SM=data/deadlines/fcfs/exact_mix_v1/fcfs_smallTask_medRes_exactmix_formal38.json --deadline-cache SL=data/deadlines/fcfs/exact_mix_v1/fcfs_smallTask_largeRes_exactmix_formal38.json --deadline-cache MS=data/deadlines/fcfs/exact_mix_v1/fcfs_medTask_smallRes_exactmix_formal38.json --deadline-cache MM=data/deadlines/fcfs/exact_mix_v1/fcfs_medTask_medRes_exactmix_formal38.json --deadline-cache ML=data/deadlines/fcfs/exact_mix_v1/fcfs_medTask_largeRes_exactmix_formal38.json --deadline-cache LS=data/deadlines/fcfs/exact_mix_v1/fcfs_largeTask_smallRes_exactmix_formal38.json --deadline-cache LM=data/deadlines/fcfs/exact_mix_v1/fcfs_largeTask_medRes_exactmix_formal38.json --deadline-cache LL=data/deadlines/fcfs/exact_mix_v1/fcfs_largeTask_largeRes_exactmix_formal38.json
+
+六、断点恢复
+找到对应的原始命令，保持 scenario、DDL、算法种子、缓存及输出目录，末尾追加 --resume。
+已启动的 SS 训练继续正常运行即可，不要为了新命令停止它或同时启动另一个 SS_T。
+若 SS 原命令是算法种子 0、T 和上述缓存，下面可以恢复同一默认输出目录：
+
+python -m algorithms.comparisons.mtgp.run_pipeline --protocol single --scenario SS --ddl T --algorithm-seed 0 --workers 4 --threads-per-worker 1 --deadline-cache SS=data/deadlines/fcfs/exact_mix_v1/fcfs_smallTask_smallRes_exactmix_formal38.json --deadline-cache SM=data/deadlines/fcfs/exact_mix_v1/fcfs_smallTask_medRes_exactmix_formal38.json --deadline-cache SL=data/deadlines/fcfs/exact_mix_v1/fcfs_smallTask_largeRes_exactmix_formal38.json --deadline-cache MS=data/deadlines/fcfs/exact_mix_v1/fcfs_medTask_smallRes_exactmix_formal38.json --deadline-cache MM=data/deadlines/fcfs/exact_mix_v1/fcfs_medTask_medRes_exactmix_formal38.json --deadline-cache ML=data/deadlines/fcfs/exact_mix_v1/fcfs_medTask_largeRes_exactmix_formal38.json --deadline-cache LS=data/deadlines/fcfs/exact_mix_v1/fcfs_largeTask_smallRes_exactmix_formal38.json --deadline-cache LM=data/deadlines/fcfs/exact_mix_v1/fcfs_largeTask_medRes_exactmix_formal38.json --deadline-cache LL=data/deadlines/fcfs/exact_mix_v1/fcfs_largeTask_largeRes_exactmix_formal38.json --resume
+
+每代保存一次，中断时未完成的那一代会重算。
+源代码、输入文件和 Python/NumPy 版本变化会拒绝恢复；不要直接迁移 Windows 断点到 Linux。
+规则已选好时，--resume 只重复最终评测。
+不同服务器首次开始训练可以使用其原环境；本地测试环境为 Python 3.12，
+当前服务器为 Python 3.11，恢复训练时请保持该服务器自己的运行版本。
+
+七、输出与日志解释
+9 个任务的默认目录相互独立，分别为：
+out/comparisons/mtgp/transport_v1/single/{SS,SM,SL}/{T,M,L}_a0/
 training_checkpoint.json：每代断点；rules.json：验证集选中的两棵树；
-history.json：逐代训练记录；eval.json / eval.csv：冻结最终评测结果。
-正式评测保持串行；训练和验证使用 CPU 多进程。无需 GPU。
-所有方法共享当前阶段式通信模型与生产评测函数；旧通信模型结果不能混入新主实验。
+history.json：逐代训练记录；eval.json / eval.csv：最终评测结果。
+日志四元组依次为：DDL 违约率、最大模糊迟到量、平均模糊迟到量、模糊能耗评分。
+按上述顺序最小化；simulated 为当代实际新评估数，cache_hits 为缓存复用数。
+每代轮换训练种子 1-5，日志是当代最佳训练结果，不是最终测试结果。
+正式评测在单个任务内部串行；多个任务同时运行时，运行耗时会受 CPU 争用影响。
+如果论文要比较调度耗时，训练完成后应在空闲服务器上逐个用原命令加 --resume 重评测。
+旧通信模型的指标不能混入当前阶段式通信模型的主实验。
 
-验证说明：本机已验证串行/并行/断点恢复一致性、命令行 smoke 和正式命令参数/输入。
-未在目标 Linux 服务器实际运行，也未完成 9 情景完整正式训练。
+验证说明：9 条命令已在本机检查参数、输出隔离、缓存与全部评测情景输入。
+未在目标 Linux 服务器启动这 9 个完整训练，也未重新安装其现有 Python 环境。
