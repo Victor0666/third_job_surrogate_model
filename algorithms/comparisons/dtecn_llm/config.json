@@ -1,0 +1,7 @@
+{
+  "schema": 3,
+  "training": {"time_steps": 50000, "validation_interval": 100},
+  "maddpg": {"gamma": 0.95, "tau": 0.01, "lr_actor": 0.0005, "lr_critic": 0.001, "batch_size": 64, "buffer_size": 200000, "epsilon": 0.1, "noise_rate": 0.1},
+  "objective": {"beta": 1.0, "eta": 1.0},
+  "llm": {"model": "meta/llama-3.1-8b-instruct", "reasoning_effort": "medium", "enable_thinking": true, "temperature": 0.2, "top_p": 0.7, "timeout": 60.0, "max_tokens": 4096, "prompt_char_budget": 48000, "initial_example_count": 8, "online_example_count": 8}
+}

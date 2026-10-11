@@ -1,5 +1,11 @@
 # 对比算法目录
 
+新增 `dtecn_llm/`：Wu et al. (TMC 2026) 的 MADDPG 引导在线上下文学习适配。
+保留 Lyapunov 工作量队列、独立 MADDPG 和 episode 内案例反馈，固定 FCFS，
+一次输出连续 VM 偏好并投影到共享环境合法动作。它只与 LLM-Safe-HRL 比较，
+不调用其他对比策略。必要环境映射、训练/案例/在线评估入口与公平性约定见
+[DTECN-LLM 说明](dtecn_llm/README.md)。
+
 新增 `mtgp/` 保留路由树先分配、输入传输后入队、排序树按 VM 队列派发的协作方式。
 所有方法采用统一分阶段通信模型，评测复用主算法的 `safe_metrics`；DRL-EA 同样
 接入该评测函数。新旧模型结果不能混合，具体见 `../../docs/STAGED_COMMUNICATION.md`。
