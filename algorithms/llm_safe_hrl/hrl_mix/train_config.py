@@ -136,11 +136,11 @@ class LagrangianSafetyConfig:
     """阶段 8 episode 违反率动态拉格朗日配置，默认关闭。"""
 
     enabled: bool = False
-    lambda_init: float = 0.5
-    lambda_lr: float = 0.02
+    lambda_init: float = 1.0
+    lambda_lr: float = 0.05
     lambda_min: float = 0.0
     lambda_max: float = 100.0
-    cost_budget: float = 0.02
+    cost_budget: float = 0.01
     update_interval: int = 1
     cost_ema_factor: float = 0.9
     # 单位是已经完成并观测的 episode 数，不是 transition/global step。
@@ -382,8 +382,8 @@ class SafeMetricsConfig:
 class SafeRLConfig:
     """安全强化学习分阶段配置；默认不启用安全训练语义。"""
 
-    safety_cost_definition: str = "actual_deadline_violation"
-    shield_semantics: str = "monitor_only"
+    safety_cost_definition: str = "dense_fuzzy_ddl_cost_v1"
+    shield_semantics: str = "active_fuzzy_ddl_shield_v1"
     enabled: bool = False
     safety_discount: float = 0.99
     safety_learning_rate: float = 3e-4
@@ -749,10 +749,10 @@ def build_train_config(
     deadline_cache_override: str | Path | None = None,
     deadline_cache_paths: Mapping[str, str] | None = None,
     output_namespace: str | None = None,
-    safe_rl_energy_reward_scale: float = 0.002,
-    safe_rl_lambda_lr: float = 0.02,
-    safe_rl_cost_budget: float = 0.02,
-    safe_rl_lambda_init: float = 0.5,
+    safe_rl_energy_reward_scale: float = 0.001,
+    safe_rl_lambda_lr: float = 0.05,
+    safe_rl_cost_budget: float = 0.01,
+    safe_rl_lambda_init: float = 1.0,
 ) -> TrainConfig:
     """根据命令行参数构造完整训练配置。
 
@@ -1078,9 +1078,9 @@ def build_train_config(
             safe_name_payload["llm_objective"] = llm_objective
             safe_name_payload["heuristic_library_sha256"] = file_sha256(resolved_manager_manifest)
         safe_name_payload["energy_reward_scale"] = float(safe_rl_energy_reward_scale)
-        safe_name_payload["energy_observation"] = "energy_relative_v1"
-        safe_name_payload["safety_cost_definition"] = "actual_deadline_violation"
-        safe_name_payload["shield_semantics"] = "monitor_only"
+        safe_name_payload["energy_observation"] = "no_relative_energy_v1"
+        safe_name_payload["safety_cost_definition"] = "dense_fuzzy_ddl_cost_v1"
+        safe_name_payload["shield_semantics"] = "active_fuzzy_ddl_shield_v1"
         safe_name_payload["cost_budget"] = float(safe_rl_cost_budget)
         safe_name_payload["lambda_init"] = float(safe_rl_lambda_init)
         if safe_rl_dynamic_lambda_enabled:
@@ -1109,8 +1109,8 @@ def build_train_config(
             + f":lambda_lr={float(safe_rl_lambda_lr):.17g}"
             + f":cost_budget={float(safe_rl_cost_budget):.17g}"
             + f":lambda_init={float(safe_rl_lambda_init):.17g}"
-            + f":energy_scale={float(safe_rl_energy_reward_scale):.17g}:energy_relative_v1"
-            + ":monitor_only:actual_deadline_violation",
+            + f":energy_scale={float(safe_rl_energy_reward_scale):.17g}:no_relative_energy_v1"
+            + ":active_fuzzy_ddl_shield_v1:dense_fuzzy_ddl_cost_v1",
         )
     run_name += "-cmb1"
     if protocol_context is None:
@@ -1416,7 +1416,7 @@ def build_train_config(
     )
 
 
-def safety_learning_identity(config: SafeRLConfig, energy_reward_scale: float = 0.002) -> dict:
+def safety_learning_identity(config: SafeRLConfig, energy_reward_scale: float = 0.001) -> dict:
     """Constraint and observation semantics shared by demonstrations and Qc."""
     from common.scheduling_transport import COMMUNICATION_MODEL_VERSION
     keys = (
@@ -1427,7 +1427,7 @@ def safety_learning_identity(config: SafeRLConfig, energy_reward_scale: float = 
     return {
         "communication_model_version": COMMUNICATION_MODEL_VERSION,
         "energy_reward_scale": float(energy_reward_scale),
-        "energy_observation": "energy_relative_v1",
+        "energy_observation": "no_relative_energy_v1",
         **{key: getattr(config, key) for key in keys},
         "shield_enabled": config.shield.enabled,
         "state_enabled": config.state.enabled,

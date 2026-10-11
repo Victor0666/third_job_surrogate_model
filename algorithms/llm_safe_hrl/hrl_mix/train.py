@@ -34,7 +34,7 @@ from hrl_mix.train_config import (
 def main(argv=None):
     """解析命令行参数，并把参数转交给训练主函数"""
     parser = argparse.ArgumentParser(description="Train the HRL Mix model for a scenario/deadline setting.")
-    parser.add_argument("--safe-rl-energy-reward-scale", type=float, default=0.002)
+    parser.add_argument("--safe-rl-energy-reward-scale", type=float, default=0.001)
     parser.add_argument(
         "--scenario",
         default=None,
@@ -120,13 +120,13 @@ def main(argv=None):
             "controller. Requires --safe-rl; default is off."
         ),
     )
-    parser.add_argument("--safe-rl-cost-budget", type=float, default=0.02)
-    parser.add_argument("--safe-rl-lambda-init", type=float, default=0.5)
+    parser.add_argument("--safe-rl-cost-budget", type=float, default=0.01)
+    parser.add_argument("--safe-rl-lambda-init", type=float, default=1.0)
     parser.add_argument(
         "--safe-rl-lambda-lr",
         type=float,
-        default=0.02,
-        help="Episode violation-rate Lagrange learning rate (default: 0.02).",
+        default=0.05,
+        help="Episode violation-rate Lagrange learning rate (default: 0.05).",
     )
     parser.add_argument(
         "--safe-rl-heuristic-manager",

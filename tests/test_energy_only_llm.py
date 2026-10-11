@@ -215,9 +215,9 @@ def test_energy_manifest_auto_isolates_safe_training(tmp_path):
         manager_heuristic_llm_only=True, manager_heuristic_manifest=str(path))
     assert 'main_energy_only' in str(cfg.save_dir)
     assert cfg.safe_rl.enabled
-    assert cfg.safe_rl.safety_cost_definition == "actual_deadline_violation"
-    assert cfg.safe_rl.shield_semantics == "monitor_only"
-    assert cfg.safe_rl.lagrangian.cost_budget == .02
+    assert cfg.safe_rl.safety_cost_definition == "dense_fuzzy_ddl_cost_v1"
+    assert cfg.safe_rl.shield_semantics == "active_fuzzy_ddl_shield_v1"
+    assert cfg.safe_rl.lagrangian.cost_budget == .01
 
 
 def test_real_evaluator_energy_identity_and_invalid_outputs(tmp_path):

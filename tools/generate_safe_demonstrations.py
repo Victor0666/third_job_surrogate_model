@@ -127,12 +127,12 @@ def main(argv=None):
             "demonstration episodes."
         )
     )
-    parser.add_argument("--safe-rl-energy-reward-scale", type=float, default=0.002)
+    parser.add_argument("--safe-rl-energy-reward-scale", type=float, default=0.001)
     parser.add_argument("--manifest", required=True)
     parser.add_argument("--deadline-cache", action="append", default=None)
-    parser.add_argument("--safe-rl-cost-budget", type=float, default=0.02)
-    parser.add_argument("--safe-rl-lambda-init", type=float, default=0.5)
-    parser.add_argument("--safe-rl-lambda-lr", type=float, default=0.02)
+    parser.add_argument("--safe-rl-cost-budget", type=float, default=0.01)
+    parser.add_argument("--safe-rl-lambda-init", type=float, default=1.0)
+    parser.add_argument("--safe-rl-lambda-lr", type=float, default=0.05)
     parser.add_argument(
         "--manager-heuristic-manifest",
         required=True,

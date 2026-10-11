@@ -86,14 +86,14 @@ CUDA_VISIBLE_DEVICES=0 python -u -m hrl_mix.ablations.fcfs_manager.evaluate_fcfs
 每个 DDL 独立运行。训练 seeds 1..5，validation 101/102/103，测试 201..230。
 SS→SS/MS/LS，SM→SM/MM/LM，SL→SL/ML/LL。
 评测冻结网络与探索计数，不训练、不重选模型。验证仍使用原 feasibility-first 字典序。
-七项 energy diagnostics 保留，按 placement 数加权，出现在 seed CSV 中，不参与 reward/selection。
+2026-10-11：随 Full 恢复截图修改前的 SHRL 设置，移除新增相对能耗观察及七项 energy diagnostics。
 
 ## 公平性与边界
 
-Host/VM 网络、超参数、PER、actual-violation Qc、monitor-only shield、fallback、
-动态 lambda、energy observation/reward/scale、种子、缓存及模型选择完全复用正式实现。
+Host/VM 网络、超参数、PER、密集安全成本 Qc、主动 shield、fallback、
+动态 lambda、安全 observation、energy reward/scale、种子、缓存及模型选择完全复用正式实现。
 与此前 Full 命令一致，本入口是无 curriculum、无 offline pretraining 的在线训练。
-默认 scale=.002、budget=.02、lambda_init=.5、lambda_lr=.02；对比时参数必须相同。
+默认 scale=.001、budget=.01、lambda_init=1、lambda_lr=.05；对比时参数必须相同。
 
 验证使用单进程而非 Full 常用的三个并行 worker，仍在同一设备按相同种子、相同函数聚合；
 这影响耗时而不改变验证定义。删除 Manager 探索会改变共享 RNG 后续消耗，

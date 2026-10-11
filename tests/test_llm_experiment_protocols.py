@@ -665,7 +665,7 @@ def test_safe_hrl_cli_forwards_single_and_multi_protocol_switches():
     assert mocked_train.call_args.kwargs["protocol"] == "multi"
     assert mocked_train.call_args.kwargs["source_scenario"] is None
     assert mocked_train.call_args.kwargs["resource_scale"] == "L"
-    assert mocked_train.call_args.kwargs["safe_rl_lambda_lr"] == 0.02
+    assert mocked_train.call_args.kwargs["safe_rl_lambda_lr"] == 0.05
 
 
 def test_safe_hrl_protocol_rejects_ambiguous_or_cross_domain_inputs():

@@ -677,10 +677,10 @@ def train(
     config_builder=None,
     manager_factory=None,
     checkpoint_writer=None,
-    safe_rl_energy_reward_scale: float = 0.002,
-    safe_rl_lambda_lr: float = 0.02,
-    safe_rl_cost_budget: float = 0.02,
-    safe_rl_lambda_init: float = 0.5,
+    safe_rl_energy_reward_scale: float = 0.001,
+    safe_rl_lambda_lr: float = 0.05,
+    safe_rl_cost_budget: float = 0.01,
+    safe_rl_lambda_init: float = 1.0,
 ):
     """执行一次完整训练
 
@@ -2706,7 +2706,7 @@ def train(
                     pinfo.get("performance_reward", r_manager_raw),
                 )
             ),
-            safety_cost=float(pinfo["manager_safety_cost"]),
+            safety_cost=float(phase_safety["safety_cost"]),
             positive_delta_risk=float(
                 phase_safety["positive_delta_risk"]
             ),
@@ -2902,7 +2902,7 @@ def train(
                     sH_next,
                     m_mask_next,
                     float(env.done_flag),
-                    cost=float(pinfo["manager_safety_cost"]),
+                    cost=float(phase_safety["safety_cost"]),
                     proposed_action=m_action_audit[
                         "proposed_action"
                     ],

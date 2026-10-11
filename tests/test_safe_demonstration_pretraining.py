@@ -251,7 +251,7 @@ class DemonstrationDatasetTests(unittest.TestCase):
             self.manifest_path, _episode("train.safe", "train", 1, 11),
             seed_split=_seed_split(), safe_rl_identity=identity,
         )
-        self.assertEqual(manifest["safety_cost_definition"], "actual_deadline_violation")
+        self.assertEqual(manifest["safety_cost_definition"], "dense_fuzzy_ddl_cost_v1")
         self.assertEqual(manifest["safe_rl_identity"], identity)
         load_demonstration_split(self.manifest_path, "train",
                                  expected_safe_rl_identity=identity)

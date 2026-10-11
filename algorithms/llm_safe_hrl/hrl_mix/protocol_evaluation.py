@@ -9,7 +9,6 @@ analysis, replay insertion, or any parameter-update method.
 
 from __future__ import annotations
 
-from base.energy_observation import ENERGY_DIAGNOSTIC_FIELDS
 import argparse
 import csv
 import hashlib
@@ -227,8 +226,6 @@ def _append_seed_result(
         ),
     }
 
-    csv_fields += ["energy_decision_count", *ENERGY_DIAGNOSTIC_FIELDS]
-    csv_row.update({field: safety.get(field) for field in ["energy_decision_count", *ENERGY_DIAGNOSTIC_FIELDS]})
     file_exists = csv_path.is_file()
 
     with csv_path.open(

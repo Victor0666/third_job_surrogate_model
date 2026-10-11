@@ -21,9 +21,7 @@ SAFE_METRIC_SOURCES = ("training", "validation", "final_test")
 
 # CSV keeps one stable aggregate schema for all three sources. Nested per-seed
 # evidence remains in JSONL/JSON and is never collapsed into the CSV cell set.
-from base.energy_observation import ENERGY_DIAGNOSTIC_FIELDS
-
-SAFE_METRIC_CSV_FIELDS = ("energy_decision_count", *ENERGY_DIAGNOSTIC_FIELDS,
+SAFE_METRIC_CSV_FIELDS = (
     "metrics_schema_version",
     "metric_source",
     "record_kind",
@@ -437,9 +435,6 @@ def build_episode_metric_record(
             minimum=0.0,
         ),
     }
-    getter = getattr(env, "get_energy_decision_diagnostics", None)
-    if callable(getter):
-        record.update(getter())
     # Compatibility aliases used by model selection and earlier tests.
     record.update(
         {
@@ -746,11 +741,6 @@ def aggregate_safe_metric_records(
         ),
         "per_seed_metrics": rows,
     }
-    decision_count = sum(int(row.get("energy_decision_count", 0)) for row in rows)
-    report["energy_decision_count"] = decision_count
-    for field in ENERGY_DIAGNOSTIC_FIELDS:
-        report[field] = sum(float(row.get(field, 0.0)) * int(row.get("energy_decision_count", 0))
-                            for row in rows) / max(decision_count, 1)
     # Compatibility aliases retained for model selection and stage metrics.
     report.update(
         {

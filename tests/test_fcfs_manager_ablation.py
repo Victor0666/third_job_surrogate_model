@@ -47,13 +47,12 @@ def test_fcfs_demo_no_library_and_energy_semantics(monkeypatch):
                    manager_mode='heuristic_selection_mode', manager_heuristic_library_path='must-not-read.json')
     result = generate_episode(env)
     assert set(result['trajectories']) == {'host', 'vm'}
-    assert result['diagnostics']['energy_decision_count'] > 0
-    assert result['diagnostics']['mean_selected_vm_energy_rank'] >= 1
+    assert 'energy_decision_count' not in result['diagnostics']
     for layer in ('host', 'vm'):
-        assert env.get_observation_schema(layer)['energy_features']
+        assert 'energy_features' not in env.get_observation_schema(layer)
         assert result['trajectories'][layer]
         for row in result['trajectories'][layer]:
-            assert row['safety_cost'] in (0, 1)
+            assert np.isfinite(row['safety_cost']) and row['safety_cost'] >= 0
             assert not row['shield_modified']
 
 
@@ -134,11 +133,11 @@ def test_real_training_host_vm_update_manager_inert(tmp_path, monkeypatch):
         report = json.loads((tmp_path / 'out/ablations/fcfs_manager' / mode / 'SS/checkpoints/evaluation.json').read_text(encoding='utf-8'))
         assert report['retrained_under_fcfs'] == (mode == 'retrained')
         assert set(report['scenario_results']) == {'SS', 'MS', 'LS'}
-        assert report['scenario_results']['SS'][4]['energy_decision_count'] > 0
+        assert 'energy_decision_count' not in report['scenario_results']['SS'][4]
     assert len(loaded) == 4
 
 
-def test_fcfs_masks_allow_predicted_unsafe_and_observation_matches_full():
+def test_fcfs_active_masks_and_observation_match_full():
     from tests.test_safe_observation_state import _make_environment
     full = _make_environment(safe_rl_enabled=True, safe_rl_state_enabled=True)
     fcfs = make_env(random_seed=0)
@@ -151,10 +150,10 @@ def test_fcfs_masks_allow_predicted_unsafe_and_observation_matches_full():
     vm_state, ready = fcfs.get_vm_state_for_current_task()
     assert ready
     context = fcfs._current_safety_shield_context
-    context['current_vm_masks']['safety_action_mask'][:] = 0
-    slot = int(np.flatnonzero(vm_state['legal_action_mask'])[0])
-    _, _, info = fcfs.vm_assign(slot)
-    assert not info['vm_shield_decision']['action_modified']
+    masks = context['current_vm_masks']
+    np.testing.assert_array_equal(masks['final_action_mask'],
+                                  masks['legal_action_mask'] * masks['safety_action_mask'])
+
 
 
 def test_fcfs_defaults_and_isolated_output(tmp_path, monkeypatch):
@@ -167,7 +166,7 @@ def test_fcfs_defaults_and_isolated_output(tmp_path, monkeypatch):
     assert cfg.train_seeds == (1, 2, 3, 4, 5)
     assert cfg.validation_seeds == (101, 102, 103)
     assert cfg.final_test_seeds == tuple(range(201, 231))
-    assert cfg.energy_reward_scale == .002
+    assert cfg.energy_reward_scale == .001
     assert 'ablations' in Path(cfg.save_dir).parts
     assert not (tmp_path / 'checkpoints/main_single').exists()
 
@@ -186,8 +185,8 @@ def test_demo_cli_manifest_has_no_topk_dependency(tmp_path, monkeypatch):
     manifests = list((tmp_path / 'out/safe_demonstrations_fcfs_ablation').rglob('manifest.json'))
     assert len(manifests) == 1
     manifest = json.loads(manifests[0].read_text(encoding='utf-8'))
-    assert manifest['energy_reward_scale'] == .002
-    assert manifest['safety_cost_definition'] == 'actual_deadline_violation'
-    assert manifest['shield_semantics'] == 'monitor_only'
+    assert manifest['energy_reward_scale'] == .001
+    assert manifest['safety_cost_definition'] == 'dense_fuzzy_ddl_cost_v1'
+    assert manifest['shield_semantics'] == 'active_fuzzy_ddl_shield_v1'
     assert [item['workflow_seed'] for item in manifest['episodes']] == [1, 2, 3, 4, 5]
     assert not any(key in manifest for key in ('heuristic_ids', 'heuristic_library_sha256', 'manager_heuristic_ids'))

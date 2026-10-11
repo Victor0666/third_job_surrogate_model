@@ -25,7 +25,7 @@ from base.safe_replay import (
 SAFE_DEMONSTRATION_DATASET_SCHEMA_VERSION = 1
 SAFE_DEMONSTRATION_EPISODE_SCHEMA_VERSION = 1
 SAFE_DEMONSTRATION_GENERATOR_POLICY = (
-    "heuristic_legal_vm_monitor_only_v2"
+    "safe_heuristic_fixed_vm_deterministic_fallback_v3"
 )
 DEMONSTRATION_LAYERS = ("manager", "host", "vm")
 TRAINING_SPLITS = frozenset({"train", "validation"})
@@ -126,9 +126,9 @@ def _validate_manager_heuristic_identity(
 
 
 def _validate_safety_definition(manifest, expected_identity=None) -> None:
-    if manifest.get("safety_cost_definition") != "actual_deadline_violation":
+    if manifest.get("safety_cost_definition") != "dense_fuzzy_ddl_cost_v1":
         raise ValueError("safety-cost definition mismatch; regenerate demonstrations")
-    if manifest.get("shield_semantics") != "monitor_only":
+    if manifest.get("shield_semantics") != "active_fuzzy_ddl_shield_v1":
         raise ValueError("shield semantics mismatch; regenerate demonstrations")
     if expected_identity is not None and manifest.get("safe_rl_identity") != expected_identity:
         raise ValueError("Safe-RL config identity mismatch; regenerate demonstrations")
@@ -820,8 +820,8 @@ def append_demonstration_episode(
             "dataset_id": str(dataset_id),
             "dataset_version": str(dataset_version),
             "manifest_revision": 0,
-            "safety_cost_definition": "actual_deadline_violation",
-            "shield_semantics": "monitor_only",
+            "safety_cost_definition": "dense_fuzzy_ddl_cost_v1",
+            "shield_semantics": "active_fuzzy_ddl_shield_v1",
             "safe_rl_identity": dict(safe_rl_identity or {}),
             "generator_policy": (
                 SAFE_DEMONSTRATION_GENERATOR_POLICY

@@ -13,7 +13,7 @@ def parser():
     p.add_argument('--episodes', type=int, choices=[600], default=600)
     p.add_argument('--optimizer-seed', type=int, default=0)
     p.add_argument('--deadline-cache', action='append', required=True)
-    p.add_argument('--safe-rl-energy-reward-scale', type=float, default=.002)
+    p.add_argument('--safe-rl-energy-reward-scale', type=float, default=.001)
     p.add_argument('--safe-rl-cost-budget', type=float, default=.02)
     p.add_argument('--safe-rl-lambda-init', type=float, default=.5)
     p.add_argument('--safe-rl-lambda-lr', type=float, default=.02)
