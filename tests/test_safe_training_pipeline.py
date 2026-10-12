@@ -245,6 +245,32 @@ class _DummyLagrange:
 
 
 class SafeTrainingPipelineTests(unittest.TestCase):
+    def test_plan_uses_configured_stage_episode_counts(self):
+        with tempfile.TemporaryDirectory() as td:
+            payload = _plan_payload()
+            for stage in payload["online_stages"]:
+                stage["transition"]["episodes"] = 60
+            controller = SafeTrainingController(
+                load_safe_training_plan(_write_plan(Path(td), payload))
+            )
+            for _ in range(299):
+                controller.record_episode()
+            self.assertFalse(controller.completed)
+            controller.record_episode()
+            self.assertTrue(controller.completed)
+            self.assertEqual(controller.total_episode_count, 300)
+
+    def test_training_episode_budget_reaches_config(self):
+        with mock.patch("hrl_mix.train_config.os.makedirs"):
+            for episodes in (None, 300, 900):
+                config = build_train_config(
+                    max_episodes=episodes, require_deadline_cache=False
+                )
+                self.assertEqual(config.max_episodes, episodes or 600)
+        for episodes in (0, -1):
+            with self.assertRaisesRegex(ValueError, "max_episodes must be positive"):
+                build_train_config(max_episodes=episodes)
+
     def test_plan_requires_disjoint_seed_splits(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)

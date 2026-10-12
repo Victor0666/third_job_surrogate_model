@@ -633,14 +633,6 @@ def load_safe_training_plan(path: str | os.PathLike[str]) -> SafeTrainingPlan:
             "every online curriculum stage must use fixed_episodes; "
             "validation cannot control stage duration"
         )
-    online_episode_budget = sum(
-        int(stage.transition.fixed_episodes) for stage in online
-    )
-    if online_episode_budget != 600:
-        raise ValueError(
-            "Safe-HRL online curriculum stages must total exactly 600 "
-            f"episodes, got {online_episode_budget}"
-        )
     all_ids = [
         stage["stage_id"] for stage in preparation
     ] + [stage.stage_id for stage in online]

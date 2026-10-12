@@ -764,6 +764,8 @@ def build_train_config(
     返回：
     - TrainConfig：训练主循环所需的全部配置。
     """
+    if max_episodes is not None and max_episodes <= 0:
+        raise ValueError("max_episodes must be positive")
     if not math.isfinite(safe_rl_energy_reward_scale) or safe_rl_energy_reward_scale <= 0:
         raise ValueError("safe_rl_energy_reward_scale must be finite and positive")
     if manager_heuristic_llm_only is None:

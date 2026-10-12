@@ -81,7 +81,7 @@ def main(argv=None):
         "--episodes",
         type=int,
         default=None,
-        help="Override the default episode count; useful for smoke tests.",
+        help="Total online training episodes (positive integer; default: 600).",
     )
     parser.add_argument(
         "--safe-rl",
@@ -240,7 +240,7 @@ def main(argv=None):
         dest="safe_rl_curriculum_enabled",
         action="store_false",
         help=(
-            "Keep all Safe-HRL components and 600 total episodes on "
+            "Keep all Safe-HRL components and the requested episodes on "
             "the formal target scenario configuration (default)."
         ),
     )
@@ -286,8 +286,8 @@ def main(argv=None):
             "--llm-run-manifest and --manager-heuristic-manifest are "
             "mutually exclusive"
         )
-    if args.episodes not in (None, 600):
-        parser.error("formal Safe-HRL training requires exactly 600 total episodes")
+    if args.episodes is not None and args.episodes <= 0:
+        parser.error("--episodes must be a positive integer")
     source_scenario = args.source_scenario or args.scenario or "SS"
     deadline_cache_paths = parse_deadline_cache_overrides(
         args.deadline_cache,

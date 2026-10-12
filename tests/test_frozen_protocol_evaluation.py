@@ -201,7 +201,8 @@ def test_single_frozen_evaluation_uses_explicit_scenario_cache_mapping():
         )
 
 
-def test_safe_hrl_deadline_cache_cli_reaches_train_config(monkeypatch):
+@pytest.mark.parametrize("episodes", [None, 1, 300, 600, 900])
+def test_safe_hrl_deadline_cache_cli_reaches_train_config(monkeypatch, episodes):
     captured = {}
 
     def fake_train(**kwargs):
@@ -213,8 +214,9 @@ def test_safe_hrl_deadline_cache_cli_reaches_train_config(monkeypatch):
             "--deadline-cache", "SS=cache_SS.json",
             "--deadline-cache", "MS=cache_MS.json",
             "--deadline-cache", "LS=cache_LS.json",
-        ]
+        ] + ([] if episodes is None else ["--episodes", str(episodes)])
     )
+    assert captured["max_episodes"] == episodes
     assert Path(captured["deadline_cache_override"]).name == "cache_SS.json"
     assert set(captured["deadline_cache_paths"]) == {"SS", "MS", "LS"}
 
@@ -233,6 +235,17 @@ def test_safe_hrl_deadline_cache_cli_reaches_train_config(monkeypatch):
     with pytest.raises(_StopBuild):
         train_runner.train(deadline_cache_override="custom_cache.json")
     assert captured["deadline_cache_override"] == "custom_cache.json"
+
+
+@pytest.mark.parametrize("episodes", ["0", "-1", "1.5"])
+def test_invalid_training_episode_count_is_rejected(monkeypatch, episodes):
+    def unexpected_train(**kwargs):
+        pytest.fail("invalid episodes must not start training")
+
+    monkeypatch.setattr(train_cli, "train", unexpected_train)
+    with pytest.raises(SystemExit) as exc:
+        train_cli.main(["--episodes", episodes])
+    assert exc.value.code == 2
 
 
 def test_test_seed_overlap_is_rejected():
