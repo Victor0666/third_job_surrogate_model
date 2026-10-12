@@ -280,6 +280,11 @@ def test_full_top10_export_and_runtime_loading(tmp_path, monkeypatch, reevaluate
     if reevaluate:
         from algorithms.llm_safe_hrl.LLM.problems.cews_task_constructive import eval as evaluator
         calls = []
+        relocated_config = tmp_path / 'relocated.yaml'
+        OmegaConf.save(OmegaConf.create(admission), relocated_config)
+        old_config = copy.deepcopy(admission)
+        old_config['deadline_cache_paths'] = {name: '/missing/old_server/cache.json' for name in caches()}
+        OmegaConf.save(OmegaConf.create(old_config), tmp_path / 'effective_admission_config.yaml')
 
         def evaluate_existing(candidate, config, seeds):
             calls.append(Path(candidate).name)
@@ -295,17 +300,26 @@ def test_full_top10_export_and_runtime_loading(tmp_path, monkeypatch, reevaluate
         old_export = tmp_path / 'topk_heuristic_library_k10.json'
         old_export.write_text('original export preserved', encoding='utf-8')
     exported = export_topk_library(source_scenario='SS', ddl='T', execution_id='energy_export',
-        top_k=10, run_dir=tmp_path, runtime_dir=runtime, llm_objective='energy_only', reevaluate=reevaluate)
+        top_k=10, run_dir=tmp_path, runtime_dir=runtime, llm_objective='energy_only', reevaluate=reevaluate,
+        reevaluation_config=relocated_config if reevaluate else None)
     library = json.loads(exported.read_text())
     validate_objective_identity(library, 'energy_only')
     assert [x['fuzzy_energy_score'] for x in library['llm_rules']] == list(range(200, 210) if reevaluate else range(100, 110))
     if reevaluate:
         assert len(calls) == 10
+        assert library['source_run']['evaluation_config_sha256'] == file_sha256(relocated_config)
         assert old_export.read_text(encoding='utf-8') == 'original export preserved'
         assert exported.name == f'topk_heuristic_library_k10_v{CEWS_EVALUATOR_PROTOCOL_VERSION}.json'
         assert library['llm_rules'][0]['source_file'].endswith('candidate_iter2_ind9.py')
         assert all(x['evaluation']['evaluator_protocol_version'] == CEWS_EVALUATOR_PROTOCOL_VERSION for x in library['llm_rules'])
         assert all(parse_evaluation_report(path)['evaluator_protocol_version'] == 4 for path in runtime.glob('problem_iter*_stdout.txt'))
+        changed_config = copy.deepcopy(admission)
+        changed_config['dataset']['arrival_lambda'] *= 2
+        OmegaConf.save(OmegaConf.create(changed_config), relocated_config)
+        with pytest.raises(ValueError, match='preserve objective and evaluation domain'):
+            export_topk_library(source_scenario='SS', ddl='T', execution_id='energy_export',
+                top_k=10, run_dir=tmp_path, runtime_dir=runtime, llm_objective='energy_only',
+                reevaluate=True, reevaluation_config=relocated_config)
     assert len({x['heuristic_id'] for x in library['llm_rules']}) == 10
     rules = load_manager_heuristic_library(exported, include_traditional=False)
     assert all(rule.available for rule in rules)

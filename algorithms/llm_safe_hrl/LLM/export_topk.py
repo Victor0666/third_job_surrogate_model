@@ -595,9 +595,12 @@ def export_topk_library(
     allow_partial_run: bool = False,
     llm_objective: str = "original",
     reevaluate: bool = False,
+    reevaluation_config: str | Path | None = None,
 ) -> Path:
     """Create a Top-K library without mutating original LLM artifacts."""
     objective_mode(llm_objective)
+    if reevaluation_config is not None and not reevaluate:
+        raise ValueError("--reevaluation-config requires --reevaluate")
     if llm_objective == "energy_only" and int(top_k) != 10:
         raise ValueError("energy_only exports exactly Top-10")
     source = str(source_scenario).strip().upper()
@@ -653,6 +656,18 @@ def export_topk_library(
     admission_scope = admission_scope_from_config(
         admission_config
     )
+    evaluation_config_path = admission_config_path
+    if reevaluation_config is not None:
+        evaluation_config_path = Path(reevaluation_config).expanduser().resolve()
+        relocated_config = OmegaConf.to_container(
+            OmegaConf.load(evaluation_config_path), resolve=True,
+        )
+        if (
+            objective_mode(relocated_config.get("llm_objective", "original")) != llm_objective
+            or evaluation_context_from_config(relocated_config) != evaluation_context
+            or admission_scope_from_config(relocated_config) != admission_scope
+        ):
+            raise ValueError("re-evaluation config must preserve objective and evaluation domain")
     expected_seeds = {
         int(seed)
         for seed in protocol.get("llm_train_seeds", [])
@@ -677,7 +692,7 @@ def export_topk_library(
         expected_seeds=expected_seeds,
         final_test_seeds=final_test_seeds,
         llm_objective=llm_objective,
-        reevaluation_config=admission_config_path if reevaluate else None,
+        reevaluation_config=evaluation_config_path if reevaluate else None,
     )
     selected = select_topk(candidates, int(top_k), llm_objective=llm_objective)
 
@@ -732,6 +747,8 @@ def export_topk_library(
         },
         "source_run": {
             "reevaluated": bool(reevaluate),
+            "evaluation_config": str(evaluation_config_path),
+            "evaluation_config_sha256": file_sha256(evaluation_config_path),
             "evaluator_protocol_version": CEWS_EVALUATOR_PROTOCOL_VERSION,
             "run_manifest": "run_manifest.json",
             "source_status": source_run_status,
@@ -861,6 +878,10 @@ def _build_parser() -> argparse.ArgumentParser:
         "--reevaluate", action="store_true",
         help="Re-evaluate existing frozen candidates with the current evaluator; export a separate versioned Top-K library.",
     )
+    parser.add_argument(
+        "--reevaluation-config", default=None,
+        help="Relocated evaluation YAML for --reevaluate; objective and evaluation domain must remain unchanged.",
+    )
     return parser
 
 
@@ -876,6 +897,7 @@ def main() -> None:
         top_k=args.top_k,
         llm_objective=args.llm_objective,
         reevaluate=args.reevaluate,
+        reevaluation_config=args.reevaluation_config,
         project_root=args.project_root,
         run_dir=args.run_dir,
         runtime_dir=args.runtime_dir,
