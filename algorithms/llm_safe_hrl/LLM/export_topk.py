@@ -256,6 +256,7 @@ def _candidate_from_report(
     expected_seeds: set[int],
     final_test_seeds: set[int],
     llm_objective: str = "original",
+    require_current_protocol: bool = True,
 ) -> dict:
     metrics = parse_evaluation_report(stdout_path)
     if objective_mode(metrics.get("llm_objective", "original")) != llm_objective:
@@ -267,7 +268,8 @@ def _candidate_from_report(
     ):
         raise ValueError("evaluation seeds are incomplete")
     if (
-        metrics.get("evaluator_protocol_version")
+        require_current_protocol
+        and metrics.get("evaluator_protocol_version")
         != CEWS_EVALUATOR_PROTOCOL_VERSION
     ):
         raise ValueError("evaluator protocol version mismatch")
@@ -355,6 +357,7 @@ def load_candidate_pool(
     expected_seeds: set[int],
     final_test_seeds: set[int],
     llm_objective: str = "original",
+    reevaluation_config: Path | None = None,
 ) -> tuple[list[dict], list[dict]]:
     """Load successful persisted evaluations and de-duplicate frozen rules."""
     if not runtime_dir.is_dir():
@@ -380,7 +383,31 @@ def load_candidate_pool(
                 expected_seeds=expected_seeds,
                 final_test_seeds=final_test_seeds,
                 llm_objective=llm_objective,
+                require_current_protocol=reevaluation_config is None,
             )
+            if reevaluation_config is not None:
+                from algorithms.llm_safe_hrl.LLM.problems.cews_task_constructive.eval import (
+                    evaluate_candidate, load_problem_config,
+                )
+                print(f"Re-evaluating {candidate['source_path'].name}", flush=True)
+                metrics = evaluate_candidate(
+                    candidate["source_path"],
+                    load_problem_config(reevaluation_config),
+                    sorted(expected_seeds),
+                )
+                refreshed_report = (
+                    runtime_dir / f"reevaluation_v{CEWS_EVALUATOR_PROTOCOL_VERSION}"
+                    / f"{stdout_path.stem}.json"
+                )
+                _atomic_write_json(refreshed_report, metrics)
+                candidate = _candidate_from_report(
+                    stdout_path=refreshed_report,
+                    run_dir=run_dir,
+                    expected_scenario=expected_scenario,
+                    expected_seeds=expected_seeds,
+                    final_test_seeds=final_test_seeds,
+                    llm_objective=llm_objective,
+                )
         except RuntimeError:
             raise
         except Exception as exc:
@@ -411,7 +438,8 @@ def load_candidate_pool(
     )
     if not candidates:
         raise ValueError(
-            "no technically valid LLM candidates were found"
+            "no technically valid LLM candidates were found: "
+            + "; ".join(item["reason"] for item in rejected[:3])
         )
     return candidates, rejected
 
@@ -566,6 +594,7 @@ def export_topk_library(
     allow_failed_final_admission: bool = False,
     allow_partial_run: bool = False,
     llm_objective: str = "original",
+    reevaluate: bool = False,
 ) -> Path:
     """Create a Top-K library without mutating original LLM artifacts."""
     objective_mode(llm_objective)
@@ -632,6 +661,15 @@ def export_topk_library(
         int(seed)
         for seed in protocol.get("final_test_seeds", [])
     }
+    if reevaluate and not expected_seeds:
+        raise ValueError("re-evaluation requires explicit LLM training seeds")
+    suffix = f"_v{CEWS_EVALUATOR_PROTOCOL_VERSION}" if reevaluate else ""
+    output_path = artifact_root / f"topk_heuristic_library_k{top_k}{suffix}.json"
+    audit_path = artifact_root / f"topk_selection_audit_k{top_k}{suffix}.json"
+    if output_path.exists() or audit_path.exists():
+        raise FileExistsError(
+            f"refusing to overwrite an existing Top-K export: {output_path}"
+        )
     candidates, rejected = load_candidate_pool(
         run_dir=artifact_root,
         runtime_dir=runtime_root,
@@ -639,24 +677,12 @@ def export_topk_library(
         expected_seeds=expected_seeds,
         final_test_seeds=final_test_seeds,
         llm_objective=llm_objective,
+        reevaluation_config=admission_config_path if reevaluate else None,
     )
     selected = select_topk(candidates, int(top_k), llm_objective=llm_objective)
 
-    report_root_name = f"topk_reports_k{top_k}"
+    report_root_name = f"topk_reports_k{top_k}{suffix}"
     report_root = artifact_root / report_root_name
-    output_path = (
-        artifact_root
-        / f"topk_heuristic_library_k{top_k}.json"
-    )
-    audit_path = (
-        artifact_root
-        / f"topk_selection_audit_k{top_k}.json"
-    )
-    if output_path.exists() or audit_path.exists():
-        raise FileExistsError(
-            "refusing to overwrite an existing Top-K export: "
-            f"{output_path}"
-        )
 
     records = []
     for rank, candidate in enumerate(selected, start=1):
@@ -705,6 +731,8 @@ def export_topk_library(
             ],
         },
         "source_run": {
+            "reevaluated": bool(reevaluate),
+            "evaluator_protocol_version": CEWS_EVALUATOR_PROTOCOL_VERSION,
             "run_manifest": "run_manifest.json",
             "source_status": source_run_status,
             "original_status": run_manifest.get("status"),
@@ -752,6 +780,7 @@ def export_topk_library(
             for rank, record in enumerate(records, start=1)
         ],
         "rejected_reports": rejected,
+        "reevaluated": bool(reevaluate),
     }
     _atomic_write_json(output_path, manifest)
     _atomic_write_json(audit_path, audit)
@@ -828,6 +857,10 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--llm-objective", choices=["original", "energy_only"], default="original")
+    parser.add_argument(
+        "--reevaluate", action="store_true",
+        help="Re-evaluate existing frozen candidates with the current evaluator; export a separate versioned Top-K library.",
+    )
     return parser
 
 
@@ -842,6 +875,7 @@ def main() -> None:
         execution_id=args.execution_id,
         top_k=args.top_k,
         llm_objective=args.llm_objective,
+        reevaluate=args.reevaluate,
         project_root=args.project_root,
         run_dir=args.run_dir,
         runtime_dir=args.runtime_dir,

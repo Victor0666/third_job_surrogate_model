@@ -26,7 +26,9 @@ from algorithms.llm_safe_hrl.LLM.rule_optimization.cmaes_optimizer import (
 )
 from algorithms.llm_safe_hrl.LLM.rule_optimization.parameter_schema import parse_rule_candidate, freeze_rule_source
 from algorithms.llm_safe_hrl.LLM.protocol_config import configure_seevo_protocol
-from algorithms.llm_safe_hrl.base.heuristic_admission import file_sha256, record_sha256
+from algorithms.llm_safe_hrl.base.heuristic_admission import (
+    CEWS_EVALUATOR_PROTOCOL_VERSION, file_sha256, record_sha256, parse_evaluation_report,
+)
 from algorithms.llm_safe_hrl.base.manager_heuristics import load_manager_heuristic_library
 from algorithms.llm_safe_hrl.base.safe_demonstration import _validate_manager_heuristic_identity
 from hrl_mix.train_config import build_train_config
@@ -243,7 +245,8 @@ def test_real_evaluator_energy_identity_and_invalid_outputs(tmp_path):
             evaluate_candidate(candidate, cfg, [1])
 
 
-def test_full_top10_export_and_runtime_loading(tmp_path):
+@pytest.mark.parametrize("reevaluate", [False, True])
+def test_full_top10_export_and_runtime_loading(tmp_path, monkeypatch, reevaluate):
     from algorithms.llm_safe_hrl.base.heuristic_admission import evaluation_context_from_config
     from algorithms.llm_safe_hrl.LLM.protocol_config import apply_seevo_scenario_config
     from algorithms.llm_safe_hrl.run_context import resolve_deadline_setting
@@ -254,6 +257,7 @@ def test_full_top10_export_and_runtime_loading(tmp_path):
     original_source = (tmp_path / template['source_file']).read_text()
     runtime = tmp_path / 'runtime'
     runtime.mkdir()
+    reports = {}
     for index in range(10):
         source = tmp_path / 'generated' / f'candidate_iter2_ind{index}.py'
         source.write_text(original_source + f'\n# distinct frozen source {index}\n', encoding='utf-8')
@@ -261,6 +265,9 @@ def test_full_top10_export_and_runtime_loading(tmp_path):
         report.update(candidate_source_file=source.name, candidate_sha256=file_sha256(source),
             frozen_rule_hash=file_sha256(source), fuzzy_total_energy_score=100. + index,
             objective=100. + index)
+        if reevaluate:
+            report["evaluator_protocol_version"] = 4
+        reports[source.name] = report
         (runtime / f'problem_iter2_ind{index}_stdout.txt').write_text('RESULT_JSON=' + json.dumps(report), encoding='utf-8')
     admission = OmegaConf.to_container(OmegaConf.load(LLM_ROOT / 'cfg/problem/cews_task_constructive_hrl_ss_admission.yaml'))
     admission = apply_seevo_scenario_config(admission, 'SS', caches(), require_files=True)
@@ -270,11 +277,35 @@ def test_full_top10_export_and_runtime_loading(tmp_path):
         deadline_setting=resolve_deadline_setting('T').identity(),
         experiment_protocol=resolve_experiment_protocol('single', source_scenario='SS').identity())
     (tmp_path / 'run_manifest.json').write_text(json.dumps(run), encoding='utf-8')
+    if reevaluate:
+        from algorithms.llm_safe_hrl.LLM.problems.cews_task_constructive import eval as evaluator
+        calls = []
+
+        def evaluate_existing(candidate, config, seeds):
+            calls.append(Path(candidate).name)
+            assert seeds == run['experiment_protocol']['llm_train_seeds']
+            assert config['llm_objective'] == 'energy_only'
+            refreshed = copy.deepcopy(reports[Path(candidate).name])
+            refreshed['evaluator_protocol_version'] = CEWS_EVALUATOR_PROTOCOL_VERSION
+            refreshed['fuzzy_total_energy_score'] = 309. - refreshed['fuzzy_total_energy_score']
+            refreshed['objective'] = refreshed['fuzzy_total_energy_score']
+            return refreshed
+
+        monkeypatch.setattr(evaluator, 'evaluate_candidate', evaluate_existing)
+        old_export = tmp_path / 'topk_heuristic_library_k10.json'
+        old_export.write_text('original export preserved', encoding='utf-8')
     exported = export_topk_library(source_scenario='SS', ddl='T', execution_id='energy_export',
-        top_k=10, run_dir=tmp_path, runtime_dir=runtime, llm_objective='energy_only')
+        top_k=10, run_dir=tmp_path, runtime_dir=runtime, llm_objective='energy_only', reevaluate=reevaluate)
     library = json.loads(exported.read_text())
     validate_objective_identity(library, 'energy_only')
-    assert [x['fuzzy_energy_score'] for x in library['llm_rules']] == list(range(100, 110))
+    assert [x['fuzzy_energy_score'] for x in library['llm_rules']] == list(range(200, 210) if reevaluate else range(100, 110))
+    if reevaluate:
+        assert len(calls) == 10
+        assert old_export.read_text(encoding='utf-8') == 'original export preserved'
+        assert exported.name == f'topk_heuristic_library_k10_v{CEWS_EVALUATOR_PROTOCOL_VERSION}.json'
+        assert library['llm_rules'][0]['source_file'].endswith('candidate_iter2_ind9.py')
+        assert all(x['evaluation']['evaluator_protocol_version'] == CEWS_EVALUATOR_PROTOCOL_VERSION for x in library['llm_rules'])
+        assert all(parse_evaluation_report(path)['evaluator_protocol_version'] == 4 for path in runtime.glob('problem_iter*_stdout.txt'))
     assert len({x['heuristic_id'] for x in library['llm_rules']}) == 10
     rules = load_manager_heuristic_library(exported, include_traditional=False)
     assert all(rule.available for rule in rules)
