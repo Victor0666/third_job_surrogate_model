@@ -1,4 +1,4 @@
-"""Shared runner for the two deterministic FCFS baselines."""
+"""Shared evaluation runner for deterministic dispatching baselines."""
 
 from __future__ import annotations
 
@@ -13,9 +13,11 @@ from algorithms.comparisons.fuzzy_common.protocol import (
     protocol_from_config,
 )
 from algorithms.comparisons.fcfs.policies import (
-    METHOD_DISPLAY_NAMES,
     POLICY_TYPES,
-    make_policy,
+)
+from algorithms.comparisons.heuristics.policies import (
+    POLICY_TYPES as HEURISTIC_POLICY_TYPES,
+    TASK_ORDER_DESCRIPTIONS,
 )
 from algorithms.llm_safe_hrl.hrl_mix.train_config import (
     parse_deadline_cache_overrides,
@@ -24,6 +26,16 @@ from algorithms.llm_safe_hrl.hrl_mix.train_config import (
 
 
 ROOT_DIR = str(PROJECT_ROOT)
+POLICY_TYPES = {**POLICY_TYPES, **HEURISTIC_POLICY_TYPES}
+METHOD_DISPLAY_NAMES = {key: value.display_name for key, value in POLICY_TYPES.items()}
+
+
+def make_policy(method_id):
+    if method_id not in POLICY_TYPES:
+        raise ValueError(f"unknown dispatching method_id: {method_id}")
+    return POLICY_TYPES[method_id]()
+
+
 DEFAULT_PROTOCOL_CONFIG = (
     PROJECT_ROOT / "algorithms" / "comparisons" / "config"
     / "fuzzy_baselines.json"
@@ -107,9 +119,9 @@ def run_formal_evaluation(
     payload = {
         "method_id": policy.method_id,
         "display_name": policy.display_name,
-        "task_order": (
-            "(ready_time, workflow_arrival_time, workflow_id, task_id)"
-        ),
+        "task_order": TASK_ORDER_DESCRIPTIONS[policy.method_id],
+        "training_performed": False,
+        "checkpoint_selection_performed": False,
         "resource_rule": (
             "earliest_available_then_vm_id"
             if policy.method_id == "fcfs_fcfs"
@@ -168,6 +180,7 @@ def run_single_generalization(
         )
         result = evaluate_policy(protocol, policy, split="final_test")
         scenario_results[scenario] = {
+            "protocol": protocol.to_manifest(),
             "aggregate": result.aggregate,
             "seed_records": list(result.records),
         }
@@ -180,6 +193,11 @@ def run_single_generalization(
         "method_id": policy.method_id,
         "display_name": policy.display_name,
         "protocol": "single",
+        "task_order": TASK_ORDER_DESCRIPTIONS[policy.method_id],
+        "resource_rule": (
+            "earliest_available_then_vm_id" if method_id == "fcfs_fcfs"
+            else "shared_select_vm_deterministic"
+        ),
         "source_scenario": source,
         "training_performed": False,
         "checkpoint_selection_performed": False,

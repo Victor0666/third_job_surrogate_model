@@ -506,6 +506,27 @@
       ],
       "llm_rule_inputs": [],
       "llm_rule_outputs": []
+    },
+    "fixed_dispatching_rules": {
+      "manager_inputs": [
+        "ready_task_ids",
+        "ready_time",
+        "workflow_arrival_time",
+        "workflow_absolute_deadline",
+        "minimum_feasible_vm_modal_execution_time",
+        "unique_descendant_work_mi"
+      ],
+      "host_inputs": [
+        "current_legal_idle_vm_mask",
+        "task_subdeadline"
+      ],
+      "vm_inputs": [
+        "predicted_fuzzy_finish",
+        "risk_adjusted_incremental_energy",
+        "vm_id"
+      ],
+      "llm_rule_inputs": [],
+      "llm_rule_outputs": []
     }
   },
   "methods": [
@@ -794,7 +815,7 @@
         "demonstration_pretraining": false,
         "llm_demonstration_pretraining": false,
         "training_seed_mode": "not_applicable",
-        "information_contract_id": "traditional_heuristic_only"
+        "information_contract_id": "fixed_dispatching_rules"
       }
     },
     {
@@ -952,6 +973,102 @@
         "llm_demonstration_pretraining": false,
         "training_seed_mode": "multi_seed",
         "information_contract_id": "mtgp"
+      }
+    },
+    {
+      "method_id": "spt_fixed",
+      "display_name": "SPT-Fixed",
+      "description": "Minimum feasible-VM modal execution time, with FCFS ties.",
+      "execution_adapter": "spt_fixed_evaluator",
+      "components": {
+        "policy_family": "fixed_heuristic",
+        "manager_policy": "fixed_heuristic",
+        "manager_observation": "not_applicable",
+        "task_ordering": "spt_fixed",
+        "heuristic_candidate_set": "SPT",
+        "fixed_heuristic_id": "traditional_spt_fixed",
+        "llm_enabled": false,
+        "llm_rule_mode": "none",
+        "llm_host_vm_access": false,
+        "host_policy": "deterministic_fixed_vm_rule",
+        "vm_policy": "deterministic_fixed_vm_rule",
+        "safe_rl": false,
+        "safety_cost_recording": false,
+        "safety_value_network": false,
+        "safety_shield": false,
+        "task_level_safety_deadline": false,
+        "fallback_controller": false,
+        "empty_safe_action_behavior": "fixed_vm_rule_internal",
+        "lagrange_mode": "none",
+        "lambda_value": null,
+        "demonstration_pretraining": false,
+        "llm_demonstration_pretraining": false,
+        "training_seed_mode": "not_applicable",
+        "information_contract_id": "fixed_dispatching_rules"
+      }
+    },
+    {
+      "method_id": "edd_fixed",
+      "display_name": "EDD-Fixed",
+      "description": "Earliest workflow absolute deadline, with FCFS ties.",
+      "execution_adapter": "edd_fixed_evaluator",
+      "components": {
+        "policy_family": "fixed_heuristic",
+        "manager_policy": "fixed_heuristic",
+        "manager_observation": "not_applicable",
+        "task_ordering": "edd_fixed",
+        "heuristic_candidate_set": "EDD",
+        "fixed_heuristic_id": "traditional_edd_fixed",
+        "llm_enabled": false,
+        "llm_rule_mode": "none",
+        "llm_host_vm_access": false,
+        "host_policy": "deterministic_fixed_vm_rule",
+        "vm_policy": "deterministic_fixed_vm_rule",
+        "safe_rl": false,
+        "safety_cost_recording": false,
+        "safety_value_network": false,
+        "safety_shield": false,
+        "task_level_safety_deadline": false,
+        "fallback_controller": false,
+        "empty_safe_action_behavior": "fixed_vm_rule_internal",
+        "lagrange_mode": "none",
+        "lambda_value": null,
+        "demonstration_pretraining": false,
+        "llm_demonstration_pretraining": false,
+        "training_seed_mode": "not_applicable",
+        "information_contract_id": "fixed_dispatching_rules"
+      }
+    },
+    {
+      "method_id": "mwkr_fixed",
+      "display_name": "MWKR-Fixed",
+      "description": "Largest current-task plus unique descendant computation work (MI), with FCFS ties.",
+      "execution_adapter": "mwkr_fixed_evaluator",
+      "components": {
+        "policy_family": "fixed_heuristic",
+        "manager_policy": "fixed_heuristic",
+        "manager_observation": "not_applicable",
+        "task_ordering": "mwkr_fixed",
+        "heuristic_candidate_set": "MWKR",
+        "fixed_heuristic_id": "traditional_mwkr_fixed",
+        "llm_enabled": false,
+        "llm_rule_mode": "none",
+        "llm_host_vm_access": false,
+        "host_policy": "deterministic_fixed_vm_rule",
+        "vm_policy": "deterministic_fixed_vm_rule",
+        "safe_rl": false,
+        "safety_cost_recording": false,
+        "safety_value_network": false,
+        "safety_shield": false,
+        "task_level_safety_deadline": false,
+        "fallback_controller": false,
+        "empty_safe_action_behavior": "fixed_vm_rule_internal",
+        "lagrange_mode": "none",
+        "lambda_value": null,
+        "demonstration_pretraining": false,
+        "llm_demonstration_pretraining": false,
+        "training_seed_mode": "not_applicable",
+        "information_contract_id": "fixed_dispatching_rules"
       }
     }
   ],

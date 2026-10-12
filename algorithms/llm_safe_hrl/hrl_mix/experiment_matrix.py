@@ -45,6 +45,9 @@ REQUIRED_METHOD_IDS = (
     "edf_baseline",
     "fcfs_fcfs",
     "fcfs_fixed",
+    "spt_fixed",
+    "edd_fixed",
+    "mwkr_fixed",
 )
 
 REQUIRED_ABLATION_IDS = (
@@ -145,6 +148,9 @@ IMPLEMENTED_EXECUTION_ADAPTERS = frozenset(
         'mtgp_pipeline',
         "fcfs_fcfs_evaluator",
         "fcfs_fixed_evaluator",
+        "spt_fixed_evaluator",
+        "edd_fixed_evaluator",
+        "mwkr_fixed_evaluator",
         "original_hrl_train_runner",
         "safe_hrl_train_runner",
     }

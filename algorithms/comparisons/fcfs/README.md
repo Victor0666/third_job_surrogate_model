@@ -1,7 +1,7 @@
 # FCFS baselines
 
 Both formal FCFS baselines use `FuzzyBaselineEnv`, the shared comparison
-protocol, and final-test seeds `201, 202, 203`.
+protocol, and final-test seeds `201-230`.
 
 - `fcfs_fcfs` (`FCFS-FCFS`) orders ready tasks by
   `(ready_time, workflow_arrival_time, workflow_id, task_id)` and selects the

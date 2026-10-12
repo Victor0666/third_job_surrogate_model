@@ -235,6 +235,8 @@ def test_single_runner_requires_and_records_complete_cache_mapping(
         scenario: str(tmp_path / f"cache_{scenario}.json")
         for scenario in ("SS", "MS", "LS")
     }
+    for path in cache_paths.values():
+        Path(path).write_text("{}", encoding="utf-8")
     monkeypatch.setattr(
         train_fcfs,
         "evaluate_policy",

@@ -1,5 +1,9 @@
 # 对比算法目录
 
+新增 `heuristics/`：FCFS-Fixed、SPT-Fixed、EDD-Fixed、MWKR-Fixed 四个
+无训练启发式基线，共用固定 deadline/energy VM 策略、主算法截止期缓存与
+201-230 测试种子。定义、公平性要求和运行命令见 [说明](heuristics/README.md)。
+
 新增 `dtecn_llm/`：Wu et al. (TMC 2026) 的 MADDPG 引导在线上下文学习适配。
 保留 Lyapunov 工作量队列、独立 MADDPG 和 episode 内案例反馈，固定 FCFS，
 一次输出连续 VM 偏好并投影到共享环境合法动作。它只与 LLM-Safe-HRL 比较，
