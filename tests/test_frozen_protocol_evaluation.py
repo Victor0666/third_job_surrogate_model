@@ -15,6 +15,34 @@ from hrl_mix.protocol_evaluation import (
 )
 from hrl_mix import train as train_cli
 from hrl_mix import train_runner
+from hrl_mix import protocol_evaluation
+
+
+@pytest.mark.parametrize("scenario", ["SS", "SM", "SL"])
+@pytest.mark.parametrize("ddl", ["Loose", "Medium", "Tight"])
+def test_energy_only_checkpoint_namespace(monkeypatch, tmp_path, scenario, ddl):
+    context = resolve_experiment_protocol("single", source_scenario=scenario)
+    monkeypatch.setattr(protocol_evaluation, "ROOT_DIR", tmp_path)
+    manifest = {"llm_objective": "energy_only"}
+
+    def read_manifest(path, *, expected_protocol_identity):
+        assert expected_protocol_identity == context.identity()
+        return manifest
+
+    monkeypatch.setattr(protocol_evaluation, "read_best_checkpoint_manifest", read_manifest)
+    monkeypatch.setattr(protocol_evaluation, "_snapshot_config", lambda value: {"ddl_name": ddl})
+    path = tmp_path / "checkpoints" / "main_energy_only" / scenario / ddl / "run" / "best_checkpoint_manifest.json"
+    path.parent.mkdir(parents=True)
+    path.write_text("{}", encoding="utf-8")
+    assert protocol_evaluation._resolve_checkpoint_path(context, path) == path.resolve()
+
+    outside = tmp_path / "best_checkpoint_manifest.json"
+    outside.write_text("{}", encoding="utf-8")
+    with pytest.raises(ValueError, match="energy-only checkpoint manifest must be inside"):
+        protocol_evaluation._resolve_checkpoint_path(context, outside)
+    manifest["llm_objective"] = "original"
+    with pytest.raises(ValueError, match="inside protocol root"):
+        protocol_evaluation._resolve_checkpoint_path(context, path)
 
 
 def _saved_config() -> dict:

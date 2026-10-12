@@ -1253,10 +1253,23 @@ def _resolve_checkpoint_path(
         )
 
     except ValueError as exc:
-        raise ValueError(
-            "checkpoint manifest must be inside protocol "
-            f"root {root}"
-        ) from exc
+        manifest = read_best_checkpoint_manifest(
+            source, expected_protocol_identity=context.identity()
+        )
+        if context.protocol != "single" or manifest.get("llm_objective") != "energy_only":
+            raise ValueError(
+                f"checkpoint manifest must be inside protocol root {root}"
+            ) from exc
+        energy_root = (
+            ROOT_DIR / "checkpoints" / "main_energy_only"
+            / context.artifact_group / _snapshot_config(manifest)["ddl_name"]
+        ).resolve()
+        try:
+            source.relative_to(energy_root)
+        except ValueError as energy_exc:
+            raise ValueError(
+                f"energy-only checkpoint manifest must be inside {energy_root}"
+            ) from energy_exc
 
     return source
 
@@ -1430,6 +1443,12 @@ def run_frozen_protocol_evaluation(
         / "test"
         / source.parent.name
     ).resolve()
+
+    if manifest.get("llm_objective") == "energy_only":
+        output_dir = (
+            ROOT_DIR / "out" / "main_energy_only" / context.artifact_group
+            / _snapshot_config(manifest)["ddl_name"] / "test" / source.parent.name
+        ).resolve()
 
     output_dir.mkdir(
         parents=True,
