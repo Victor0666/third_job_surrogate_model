@@ -98,6 +98,7 @@ def _environment_kwargs(cfg, workflow_seed, resource_seed):
             cfg.safe_rl.state.recent_record_window
         ),
         "manager_mode": "heuristic_selection_mode",
+        "allow_v3_energy_only_topk": cfg.safe_rl.manager_heuristics.allow_v3_energy_only_topk,
         "manager_heuristic_library_path": (
             cfg.safe_rl.manager_heuristics.library_manifest_path
         ),

@@ -657,6 +657,7 @@ def train(
     safe_rl_heuristic_manager_enabled: bool = False,
     manager_heuristic_llm_only: bool | None = None,
     manager_heuristic_manifest: str | None = None,
+    allow_v3_energy_only_topk: bool = False,
     llm_run_manifest: str | None = None,
     safe_rl_offline_pretrain_manifest: str | None = None,
     safe_rl_offline_pretrain_epochs: int = 5,
@@ -713,6 +714,7 @@ def train(
         manager_heuristic_llm_only=(
             manager_heuristic_llm_only
         ),
+        allow_v3_energy_only_topk=allow_v3_energy_only_topk,
         manager_heuristic_manifest=(
             manager_heuristic_manifest
         ),
@@ -885,6 +887,7 @@ def train(
             cfg.safe_rl.state.recent_record_window
         ),
         manager_mode=cfg.safe_rl.manager_heuristics.mode,
+        allow_v3_energy_only_topk=cfg.safe_rl.manager_heuristics.allow_v3_energy_only_topk,
         manager_heuristic_library_path=(
             cfg.safe_rl.manager_heuristics.library_manifest_path
         ),

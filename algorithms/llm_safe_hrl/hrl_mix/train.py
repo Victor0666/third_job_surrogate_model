@@ -166,6 +166,8 @@ def main(argv=None):
         ),
     )
     parser.set_defaults(manager_heuristic_llm_only=None)
+    parser.add_argument("--allow-v3-energy-only-topk", action="store_true",
+                        help="Use a fixed v3 energy-only Top-K in v5; preserve original provenance.")
     parser.add_argument(
         "--manager-heuristic-manifest",
         default=None,
@@ -318,6 +320,7 @@ def main(argv=None):
         manager_heuristic_llm_only=(
             args.manager_heuristic_llm_only
         ),
+        allow_v3_energy_only_topk=args.allow_v3_energy_only_topk,
         manager_heuristic_manifest=(
             args.manager_heuristic_manifest
         ),

@@ -326,3 +326,69 @@ def test_full_top10_export_and_runtime_loading(tmp_path, monkeypatch, reevaluate
     with pytest.raises(ValueError, match='objective mismatch'):
         export_topk_library(source_scenario='SS', ddl='T', execution_id='energy_export',
             top_k=10, run_dir=tmp_path, runtime_dir=runtime, llm_objective='original')
+
+
+@pytest.mark.parametrize("version", [3, 4, 2])
+def test_v3_topk_opt_in_preserves_checks(tmp_path, version):
+    from algorithms.llm_safe_hrl.base.heuristic_admission import canonical_json_sha256
+    path, _ = energy_library(tmp_path)
+    payload = json.loads(path.read_text())
+    entry = payload['llm_rules'][0]
+    entry['evaluation']['evaluator_protocol_version'] = version
+    report = tmp_path / entry['evaluation_report_file']
+    report.write_text(json.dumps(entry['evaluation']), encoding='utf-8')
+    entry['evaluation_report_hash'] = file_sha256(report)
+    entry['evaluation_result_sha256'] = canonical_json_sha256(entry['evaluation'])
+    entry['record_sha256'] = record_sha256(entry)
+    path.write_text(json.dumps(payload), encoding='utf-8')
+    strict = load_manager_heuristic_library(path, include_traditional=False)[0]
+    assert not strict.available
+    assert 'evaluator_protocol_version_mismatch' in strict.availability_reason
+    compatible = load_manager_heuristic_library(path, include_traditional=False,
+                                                allow_v3_energy_only_topk=True)[0]
+    assert compatible.available == (version == 3), compatible.availability_reason
+    if version == 3:
+        assert not compatible.admitted
+        assert compatible.metadata['evaluation']['evaluator_protocol_version'] == 3
+        cfg = build_train_config(protocol='single', source_scenario='SS', ddl='T',
+            safe_rl_enabled=True, safe_rl_shield_enabled=True, safe_rl_state_enabled=True,
+            safe_rl_dynamic_lambda_enabled=True, safe_rl_heuristic_manager_enabled=True,
+            deadline_cache_paths=caches(), manager_heuristic_manifest=str(path),
+            allow_v3_energy_only_topk=True)
+        assert cfg.safe_rl.manager_heuristics.allow_v3_energy_only_topk
+        from dataclasses import asdict
+        from tools.generate_safe_demonstrations import _environment_kwargs
+        from hrl_mix.protocol_evaluation import build_frozen_scenario_env_kwargs
+        from algorithms.llm_safe_hrl.scenario_registry import resolve_experiment_protocol
+        assert _environment_kwargs(cfg, 1, 1)['allow_v3_energy_only_topk']
+        saved_config = asdict(cfg)
+        kwargs = build_frozen_scenario_env_kwargs(saved_config,
+            resolve_experiment_protocol('single', source_scenario='SS'), 'SS', path,
+            deadline_cache_overrides=caches())
+        assert kwargs['allow_v3_energy_only_topk']
+        # Keep source/report identity checks even after the version exception.
+        source = tmp_path / entry['source_file']
+        source.write_text(source.read_text() + '\n# changed\n')
+        rejected = load_manager_heuristic_library(path, include_traditional=False,
+                                                 allow_v3_energy_only_topk=True)[0]
+        assert not rejected.available
+        assert 'hash' in rejected.availability_reason
+
+
+def test_v3_original_topk_is_not_allowed(tmp_path):
+    from algorithms.llm_safe_hrl.base.manager_heuristics import _topk_reasons
+    reasons = _topk_reasons({'evaluation': {'evaluator_protocol_version': 3,
+        'llm_objective': 'original'}, 'llm_objective': 'original'}, None, {}, {}, True)
+    assert 'evaluator_protocol_version_mismatch' in reasons
+
+
+def test_v3_compatibility_cli_forwarding():
+    import hrl_mix.train as cli
+    from unittest.mock import patch
+    args = [item for key, value in caches().items() for item in ('--deadline-cache', f'{key}={value}')]
+    with patch.object(cli, 'train') as run:
+        cli.main(args + ['--allow-v3-energy-only-topk'])
+        assert run.call_args.kwargs['allow_v3_energy_only_topk'] is True
+    with patch.object(cli, 'train') as run:
+        cli.main(args)
+        assert run.call_args.kwargs['allow_v3_energy_only_topk'] is False

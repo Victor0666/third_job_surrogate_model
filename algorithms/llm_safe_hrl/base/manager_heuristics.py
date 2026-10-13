@@ -654,6 +654,7 @@ def _topk_reasons(
     runtime_context: Mapping | None,
     manifest_admission_scope: Mapping,
     manifest_protocol: Mapping,
+    allow_v3_energy_only_topk: bool = False,
 ) -> list[str]:
     """Validate Top-K provenance without applying admission thresholds."""
     evaluation = entry.get("evaluation")
@@ -727,6 +728,13 @@ def _topk_reasons(
     if (
         evaluation.get("evaluator_protocol_version")
         != CEWS_EVALUATOR_PROTOCOL_VERSION
+        and not (
+            allow_v3_energy_only_topk
+            and CEWS_EVALUATOR_PROTOCOL_VERSION == 5
+            and evaluation.get("evaluator_protocol_version") == 3
+            and evaluation.get("llm_objective") == "energy_only"
+            and entry.get("llm_objective") == "energy_only"
+        )
     ):
         reasons.append("evaluator_protocol_version_mismatch")
 
@@ -934,6 +942,7 @@ def _llm_heuristic(
     manifest_admission_scope: Mapping,
     manifest_protocol: Mapping,
     selection_mode: str,
+    allow_v3_energy_only_topk: bool = False,
 ) -> ManagerHeuristic:
     heuristic_id = str(entry.get("heuristic_id", "")).strip()
     version = str(entry.get("version", "")).strip()
@@ -953,6 +962,7 @@ def _llm_heuristic(
             runtime_context,
             manifest_admission_scope,
             manifest_protocol,
+            allow_v3_energy_only_topk,
         )
     else:
         reasons = _admission_reasons(
@@ -1083,6 +1093,7 @@ def load_manager_heuristic_library(
     runtime_context: Mapping | None = None,
     expected_protocol_identity=None,
     include_traditional: bool = True,
+    allow_v3_energy_only_topk: bool = False,
 ) -> tuple[ManagerHeuristic, ...]:
     """加载五个传统规则及 manifest 中所有稳定 LLM 动作槽。
 
@@ -1317,6 +1328,7 @@ def load_manager_heuristic_library(
                 else {}
             ),
             selection_mode=selection_mode,
+            allow_v3_energy_only_topk=allow_v3_energy_only_topk,
         )
         for entry in entries
     )

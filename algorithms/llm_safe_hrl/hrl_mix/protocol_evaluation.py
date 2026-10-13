@@ -678,6 +678,7 @@ def build_frozen_scenario_env_kwargs(
                 library_path
             ).resolve()
         ),
+        "allow_v3_energy_only_topk": bool(manager.get("allow_v3_energy_only_topk", False)),
         "manager_heuristic_llm_only": bool(
             manager.get(
                 "llm_only",
@@ -1389,6 +1390,9 @@ def run_frozen_protocol_evaluation(
     load_manager_heuristic_library(
         library_path,
         expected_protocol_identity=identity,
+        allow_v3_energy_only_topk=bool(
+            _snapshot_config(manifest)["safe_rl"]["manager_heuristics"].get(
+                "allow_v3_energy_only_topk", False)),
     )
 
     replay_metadata = _required(

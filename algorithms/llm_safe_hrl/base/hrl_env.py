@@ -376,6 +376,7 @@ class HrlHeftEnv(gym.Env):
         manager_mode=LEGACY_RULE_WEIGHT_MODE,
         manager_heuristic_library_path=None,
         manager_heuristic_llm_only=False,
+        allow_v3_energy_only_topk=False,
         experiment_protocol_identity=None,
         manager_heuristic_recent_window=20,
         scenario_code=None,
@@ -449,6 +450,7 @@ class HrlHeftEnv(gym.Env):
         )
         # 为真时 Manager 动作空间只含 manifest 中的 LLM 规则，
         # 五个传统规则连动作槽都不会构造。
+        self.allow_v3_energy_only_topk = bool(allow_v3_energy_only_topk)
         self.manager_heuristic_llm_only = bool(
             manager_heuristic_llm_only
         )
@@ -795,6 +797,7 @@ class HrlHeftEnv(gym.Env):
                     expected_protocol_identity=(
                         self.experiment_protocol_identity
                     ),
+                    allow_v3_energy_only_topk=self.allow_v3_energy_only_topk,
                     include_traditional=(
                         not self.manager_heuristic_llm_only
                     ),

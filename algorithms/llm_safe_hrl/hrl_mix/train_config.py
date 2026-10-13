@@ -198,6 +198,7 @@ class SafeManagerHeuristicConfig:
     mode: str = "legacy_rule_weight_mode"
     library_manifest_path: str | None = None
     recent_window: int = 20
+    allow_v3_energy_only_topk: bool = False
     llm_only: bool | None = None
 
     def __post_init__(self) -> None:
@@ -732,6 +733,7 @@ def build_train_config(
     safe_rl_heuristic_manager_enabled: bool = False,
     manager_heuristic_llm_only: bool | None = None,
     manager_heuristic_manifest: str | None = None,
+    allow_v3_energy_only_topk: bool = False,
     llm_run_manifest: str | None = None,
     safe_rl_offline_pretrain_manifest: str | None = None,
     safe_rl_offline_pretrain_epochs: int = 5,
@@ -764,6 +766,8 @@ def build_train_config(
     返回：
     - TrainConfig：训练主循环所需的全部配置。
     """
+    if allow_v3_energy_only_topk and not safe_rl_heuristic_manager_enabled:
+        raise ValueError("allow_v3_energy_only_topk requires the heuristic Manager")
     if max_episodes is not None and max_episodes <= 0:
         raise ValueError("max_episodes must be positive")
     if not math.isfinite(safe_rl_energy_reward_scale) or safe_rl_energy_reward_scale <= 0:
@@ -1079,6 +1083,8 @@ def build_train_config(
             from base.heuristic_admission import file_sha256
             safe_name_payload["llm_objective"] = llm_objective
             safe_name_payload["heuristic_library_sha256"] = file_sha256(resolved_manager_manifest)
+        if allow_v3_energy_only_topk:
+            safe_name_payload["allow_v3_energy_only_topk"] = True
         safe_name_payload["energy_reward_scale"] = float(safe_rl_energy_reward_scale)
         safe_name_payload["energy_observation"] = "no_relative_energy_v1"
         safe_name_payload["safety_cost_definition"] = "dense_fuzzy_ddl_cost_v1"
@@ -1268,6 +1274,7 @@ def build_train_config(
                 ),
                 recent_window=20,
                 llm_only=bool(manager_heuristic_llm_only),
+                allow_v3_energy_only_topk=bool(allow_v3_energy_only_topk),
             ),
             offline_pretraining=OfflinePretrainingConfig(
                 enabled=offline_pretraining_enabled,
