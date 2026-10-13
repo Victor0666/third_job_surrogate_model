@@ -23,11 +23,28 @@ def load_compatible_manifest(root, expected):
     saved_hashes = saved.get("identity", {}).get("source_and_input_hashes", {})
     if current_hashes.get(path) == new and saved_hashes.get(path) == old:
         current_hashes[path] = old
+    # e1700bf adds opt-in SHRL Top-K support; DTECN keeps heuristic Manager disabled.
+    audited = {
+        "algorithms/llm_safe_hrl/hrl_mix/train_config.py": (
+            "04d7913731188d56686d2296d0d416abba6fa9b2ac104c93b5abc120d6b414fc",
+            {old, new}),
+        "algorithms/llm_safe_hrl/base/hrl_env.py": (
+            "d4cbe584ee233c7e97d7397e859efe788c1d929f1db868387c543426979c3d66",
+            {"e3b2677c1285739656f7153f1cf872ad1eb620ebd040e5d1d454a7673a70df0e"}),
+        "algorithms/llm_safe_hrl/base/manager_heuristics.py": (
+            "76cbdd2fc7d062f0a0b2e1f1df5828dadb8f4c63c676f868dfed3b5af29974a0",
+            {"6bdda6e760adf91958de9e84cd0fdc78e273375249b813bb6101c4c035da8338"}),
+    }
+    if checked.get("method") == "dtecn_llm":
+        for relative, (current, previous) in audited.items():
+            key = str((runner.ROOT / relative).resolve())
+            if current_hashes.get(key) == current and saved_hashes.get(key) in previous:
+                current_hashes[key] = saved_hashes[key]
     manifest = _load_manifest(root, checked)
     if checked != expected:
         print(json.dumps(dict(source_compatibility={
-            "file": path, "trained_sha256": old, "current_sha256": new,
-            "reason": "audited max_episodes validation only"})), flush=True)
+            key: {"trained_sha256": value, "current_sha256": expected["source_and_input_hashes"][key]}
+            for key, value in current_hashes.items() if value != expected["source_and_input_hashes"][key]})), flush=True)
     return manifest
 
 

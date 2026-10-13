@@ -151,11 +151,47 @@ def test_collect_and_evaluate_entry_reuses_teacher_without_overwriting(tmp_path,
                     for t, vm in zip(state["tasks"], plan)]}), {"total_tokens": 1}
     monkeypatch.setattr(entry, "LLMClient", Client)
     entry.main(["evaluate"] + args)
-    root = tmp_path / "batch_v1"
+    roots = list((tmp_path / "batch_v1/evaluations").iterdir())
+    assert len(roots) == 1
+    root = roots[0]
     assert (root / "icl_final_test.csv").exists()
     assert (root / "icl_final_test_decisions.csv").exists()
     assert (root / "icl_final_test_batches.jsonl").exists()
     assert (tmp_path / "manifest.json").read_bytes() == original
-    assert runner.file_hash(tmp_path / "maddpg.pt") == runner.file_hash(root / "maddpg.pt")
+    assert runner.file_hash(tmp_path / "maddpg.pt") == runner.file_hash(tmp_path / "batch_v1/maddpg.pt")
     with pytest.raises(FileExistsError):
         entry.main(["evaluate"] + args)
+    cases_hash = runner.file_hash(tmp_path / "batch_v1/cases.jsonl")
+    entry.main(["evaluate"] + args + ["--model", "qwen-plus", "--thinking", "off", "--max-tokens", "128"])
+    assert len(list((tmp_path / "batch_v1/evaluations").iterdir())) == 2
+    assert runner.file_hash(tmp_path / "batch_v1/cases.jsonl") == cases_hash
+    assert (tmp_path / "manifest.json").read_bytes() == original
+
+
+def test_legacy_batch_case_migration_keeps_all_other_fields_checked(tmp_path):
+    from copy import deepcopy
+    from pathlib import Path
+    from tools import run_dtecn_llm_batch as entry
+    from algorithms.comparisons.dtecn_llm import run as runner
+    import hashlib
+    from tools.dtecn_batch_policy import BATCH_PROMPT
+    teacher = dict(schema=3, method="dtecn_llm", config={"llm": {"model": "qwen3.8-max"}},
+                   source_and_input_hashes={"workload": "unchanged"})
+    expected = dict(teacher_checkpoint_sha256="same", batch_policy_sha256="policy")
+    legacy = deepcopy(teacher)
+    legacy.update(decision_mode="fcfs_joint_batch_v1", teacher_identity=teacher,
+        teacher_checkpoint_sha256="same", prompt_sha256=hashlib.sha256(BATCH_PROMPT.encode()).hexdigest(),
+        batch_source_hashes={str(Path(entry.__file__).resolve()):
+            "68a54ac46bfce29b989eaefb6242543ae85db6b9626b2550dafb899f935722b7",
+            str(Path(entry.__file__).with_name("dtecn_batch_policy.py").resolve()): "policy",
+            str(Path(entry.__file__).with_name("evaluate_dtecn_llm_with_csv.py").resolve()):
+                "5926b798c248d83ddd2a5f66fdef18327c0e2d943be49751874a15fbb4fa6f65"})
+    manifest = dict(identity=legacy, artifacts={})
+    runner.write_json(tmp_path / "manifest.json", manifest)
+    original = (tmp_path / "manifest.json").read_bytes()
+    assert entry.load_batch_manifest(tmp_path, expected, teacher, teacher) == manifest
+    assert (tmp_path / "manifest.json").read_bytes() == original
+    bad = deepcopy(teacher)
+    bad["source_and_input_hashes"]["workload"] = "changed"
+    with pytest.raises(ValueError, match="identity mismatch"):
+        entry.load_batch_manifest(tmp_path, expected, bad, teacher)

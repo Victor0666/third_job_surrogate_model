@@ -1,5 +1,21 @@
 # DTECN-LLM 批量在线调度
 
+教师身份与评测 LLM 已分离。教师记录的旧 LLM 配置只作来源记录；`--model`、`--reasoning-effort`、`--max-tokens`、`--thinking auto|on|off` 只影响在线评测，不要求与教师一致。网络、训练奖励、协议、种子、输入与检查点校验不放开。
+
+已经生成且通过校验的批量案例无需重新收集。已发布的旧 batch_v1 案例仅按已审核的旧入口/策略/日志哈希兼容读取，不改写原 manifest。教师共享源码兼容限定于已审核的 max_episodes 校验和默认关闭的 SHRL Top-K 开关变更；其他差异仍拒绝。
+
+使用同一个 SS 教师评测 qwen-plus：
+
+```bash
+python -u -m tools.run_dtecn_llm_batch evaluate \
+    --teacher-run "$TEACHER" --protocol single --scenario SS --ddl T --optimizer-seed 1 \
+    --model qwen-plus --thinking auto --max-tokens 32768 --device cuda
+```
+
+qwen-plus 的 auto 模式不发送 enable_thinking/reasoning_effort，使用服务默认；on/off 显式发送 enable_thinking。qwen3.8-max 沿用已适配的 enable_thinking/reasoning_effort，off 时不发送推理力度。不同模型不会继承不适用的教师推理力度；显式指定当前适配器不支持的设置会提前报错。其他千问版本可用 auto 按基础兼容接口调用，服务账号和具体快照的可用性须实际确认。
+
+每次结果保存到 `TEACHER/batch_v1/evaluations/<配置哈希>/`。evaluation_config.json 记录教师/案例身份、模型、请求设置和去除凭据的服务地址；最终结果另记录 SDK 版本和服务实际返回的模型。不同模型、服务地址或参数隔离；原 batch_v1 下的旧结果保留。案例和 MADDPG 副本仍在 batch_v1 根目录。
+
 MADDPG 网络、训练奖励、训练预算和更新规则保持不变。批量模式使用单独入口，旧逐任务工件不覆盖、不冒充批量结果。LLM API 请求参数与原入口相同。
 
 每次取当前模拟时刻的 FCFS 就绪任务最长可行前缀。可行性检查采用二分匹配，仅检查存在无冲突合法分配，不优化能耗或延迟，不跳过前面的任务。每个空闲 VM 批内只接收一个任务；忙 VM 不排队。
@@ -30,7 +46,7 @@ SS 教师评测 SS/MS/LS，各使用 201–230。SM 教师评测 SM/MM/LM，SL �
 
 ## 输出
 
-结果在 `TEACHER/batch_v1/`，包含独立 checkpoint 副本、manifest、新批量 cases.jsonl，以及：
+案例在 `TEACHER/batch_v1/`，包含独立 checkpoint 副本、manifest、新批量 cases.jsonl。评测子目录包含：
 
 - `icl_final_test_decisions.csv`：每成功提交一个任务立即写一行，包含 batch_id/batch_size。同批 5 个任务形成 5 行，但最多一次请求。
 - `icl_final_test_decisions.jsonl`：每个种子完成后保存逐任务记录。
