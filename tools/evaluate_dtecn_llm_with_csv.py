@@ -1,5 +1,6 @@
 """Run online validation/test with immediate CSV logging; keep core artifact hashes."""
 import csv
+from copy import deepcopy
 import json
 import sys
 from unittest.mock import patch
@@ -8,6 +9,26 @@ from algorithms.comparisons.dtecn_llm import run as runner
 
 
 _evaluate = runner.evaluate
+_load_manifest = runner.load_manifest
+
+
+def load_compatible_manifest(root, expected):
+    saved = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+    checked = deepcopy(expected)
+    path = str((runner.ROOT / "algorithms/llm_safe_hrl/hrl_mix/train_config.py").resolve())
+    old = "f227b95457cbc9047395c9277e293394349a88c503da9bad243a93e5fee8f271"
+    new = "72ee80c2c59939376922416f5cbcb57243bc97c9c234fc82e7c6ffb1d298a6ab"
+    # Only this audited change adds max_episodes<=0 rejection; DTECN never uses it.
+    current_hashes = checked.get("source_and_input_hashes", {})
+    saved_hashes = saved.get("identity", {}).get("source_and_input_hashes", {})
+    if current_hashes.get(path) == new and saved_hashes.get(path) == old:
+        current_hashes[path] = old
+    manifest = _load_manifest(root, checked)
+    if checked != expected:
+        print(json.dumps(dict(source_compatibility={
+            "file": path, "trained_sha256": old, "current_sha256": new,
+            "reason": "audited max_episodes validation only"})), flush=True)
+    return manifest
 
 
 def evaluate_with_csv(protocol, policy, split, trace_path=None):
@@ -49,7 +70,8 @@ def main(argv=None):
     args = list(sys.argv[1:] if argv is None else argv)
     if not args or args[0] not in ("validate", "evaluate"):
         raise SystemExit("Use validate or evaluate, followed by the original DTECN options")
-    with patch.object(runner, "evaluate", evaluate_with_csv):
+    with patch.object(runner, "evaluate", evaluate_with_csv), \
+            patch.object(runner, "load_manifest", load_compatible_manifest):
         return runner.main(args)
 
 

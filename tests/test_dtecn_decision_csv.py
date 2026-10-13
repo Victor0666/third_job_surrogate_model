@@ -1,4 +1,5 @@
 import csv
+from copy import deepcopy
 import json
 from types import SimpleNamespace
 
@@ -65,3 +66,31 @@ def test_real_episode_logs_every_assignment_without_changing_results(tmp_path):
     trace = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
     assert len(rows) == len(trace)
     assert [int(row["executed_vm_id"]) for row in rows] == [row["executed_vm_id"] for row in trace]
+
+
+def test_only_audited_config_hash_change_is_compatible(tmp_path):
+    path = str((logging.runner.ROOT / "algorithms/llm_safe_hrl/hrl_mix/train_config.py").resolve())
+    old = "f227b95457cbc9047395c9277e293394349a88c503da9bad243a93e5fee8f271"
+    new = "72ee80c2c59939376922416f5cbcb57243bc97c9c234fc82e7c6ffb1d298a6ab"
+    saved = dict(schema=3, source_and_input_hashes={path: old, "environment.py": "unchanged"},
+                 config={"gamma": .95})
+    manifest = dict(identity=saved, artifacts={"maddpg.pt": logging.runner.file_hash(logging.runner.CONFIG)})
+    (tmp_path / "maddpg.pt").write_bytes(logging.runner.CONFIG.read_bytes())
+    (tmp_path / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    expected = deepcopy(saved)
+    expected["source_and_input_hashes"][path] = new
+    assert logging.load_compatible_manifest(tmp_path, expected) == manifest
+    assert expected["source_and_input_hashes"][path] == new
+    for changed in ("other_source", "algorithm_config", "unknown_hash"):
+        bad = deepcopy(expected)
+        if changed == "other_source":
+            bad["source_and_input_hashes"]["environment.py"] = "changed"
+        elif changed == "algorithm_config":
+            bad["config"]["gamma"] = .9
+        else:
+            bad["source_and_input_hashes"][path] = "unreviewed"
+        with pytest.raises(ValueError, match="identity mismatch"):
+            logging.load_compatible_manifest(tmp_path, bad)
+    (tmp_path / "maddpg.pt").write_text("corrupt")
+    with pytest.raises(ValueError, match="artifact hash mismatch"):
+        logging.load_compatible_manifest(tmp_path, expected)
