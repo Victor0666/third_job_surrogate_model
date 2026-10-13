@@ -2,20 +2,24 @@
 import json
 from concurrent.futures import ThreadPoolExecutor
 import os
+from types import SimpleNamespace
 from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
 
 import numpy as np
+from omegaconf import OmegaConf
 
 from algorithms.comparisons.pure_gp_hrl.core import (
     PureGPProgram, random_program, crossover, mutate, frozen_source, terminals_for_objective,
 )
 from algorithms.comparisons.pure_gp_hrl.generate import (
-    RuleEvaluator, export_library, EvaluationBudgetExceeded, evaluation_pool, main as generate_main,
+    RuleEvaluator, export_library, EvaluationBudgetExceeded, evaluation_pool, experiment_settings,
+    main as generate_main,
 )
 from algorithms.comparisons.pure_gp_hrl.train import validate_gp_library, main as train_main, build_gp_config
+from algorithms.comparisons.pure_gp_hrl import evaluate as pure_evaluation
 from algorithms.comparisons.drlea_nichgp.gp_primitives import program_depth
 from algorithms.llm_safe_hrl.LLM.rule_optimization import CMAESOptimizer, extract_rule_metadata
 from algorithms.llm_safe_hrl.LLM.export_topk import topk_ranking_key
@@ -134,13 +138,6 @@ class PureGPTests(unittest.TestCase):
                 candidates.append(dict(metrics=metrics, source_path=path, source_hash=file_sha256(path),
                                        iteration=0, individual=index, ranking_key=topk_ranking_key(metrics),
                                        program=program.to_dict()))
-            reference_path = directory / 'reference.json'
-            reference = {'selection_policy': dict(policy_version='feasibility_first_topk_v1',
-                unique_structure_first=True, hard_energy_threshold=None,
-                ranking_fields=['constraint_feasible', 'max_deadline_violation_rate_across_seeds',
-                                'max_fuzzy_lateness', 'fuzzy_total_energy_score',
-                                'objective_cv_across_seeds', 'candidate_sha256'])}
-            reference_path.write_text(json.dumps(reference), encoding='utf-8')
             c = _context()
             config = dict(dataset={key: c[key] for key in ('workflows_per_instance', 'arrival_lambda',
                 'horizon', 'deadline_mode', 'deadline_alpha_small', 'deadline_alpha_large',
@@ -151,13 +148,38 @@ class PureGPTests(unittest.TestCase):
                            resource_seed_mode='episode_seed', resource_seed_offset=0), admission_scope=_scope())
             config['dataset'].update(scenario='SS', dax_files=['CyberShake_30.xml', 'Epigenomics_24.xml',
                 'Ligo_30.xml', 'Montage_25.xml', 'Sipht_29.xml'])
-            path = export_library(directory, reference_path, reference, CONTEXT,
+            config_path = directory / 'experiment.yaml'
+            OmegaConf.save(OmegaConf.create(config), config_path)
+            path = export_library(directory, config_path, CONTEXT,
                                   resolve_deadline_setting('T'), 1, 'original', config, candidates, SEARCH)
             payload, _ = validate_gp_library(path)
             self.assertEqual(payload['llm_rules'][0]['source_hash'], candidates[1]['source_hash'])
             self.assertTrue(load_manager_heuristic_library(path, include_traditional=False)[0].available)
             self.assertFalse(payload['cmaes_enabled'])
             self.assertFalse(payload['parameter_optimization_enabled'])
+            self.assertNotIn('reference_library', payload)
+            self.assertEqual(payload['experiment_config_sha256'], file_sha256(config_path))
+            with patch('algorithms.comparisons.pure_gp_hrl.train.build_train_config',
+                       return_value=SimpleNamespace(save_dir=str(directory))):
+                build_gp_config(manager_heuristic_manifest=path, source_scenario='SS', ddl='T')
+            training_identity = json.loads((directory / 'gp_ablation.json').read_text(encoding='utf-8'))
+            self.assertEqual(training_identity['experiment_config_sha256'], file_sha256(config_path))
+            manifest = dict(ablation='pure_gp_hrl', retrained_under_gp=True,
+                heuristic_library_version=dict(manifest_sha256=file_sha256(path)),
+                experiment_protocol=CONTEXT.identity(), config_snapshot={'config': {'ddl_name': 'T'}},
+                resolved_agent_checkpoints={layer: 'unused' for layer in ('manager', 'host', 'vm')},
+                replay_metadata={layer: {} for layer in ('manager', 'host', 'vm')})
+            with patch.object(pure_evaluation, 'read_best_checkpoint_manifest', return_value=manifest), \
+                 patch.object(pure_evaluation, '_load_frozen_agent', return_value=object()), \
+                 patch.object(pure_evaluation, '_snapshot_config', return_value={}), \
+                 patch.object(pure_evaluation, 'evaluate_frozen_protocol_scenarios', return_value={'ok': True}), \
+                 patch.object(pure_evaluation, 'ROOT_DIR', directory):
+                report_path = pure_evaluation.main(['--checkpoint-manifest', str(directory / 'best.json'),
+                    '--gp-library', str(path), '--deadline-cache', 'SS=cache',
+                    '--deadline-cache', 'MS=cache', '--deadline-cache', 'LS=cache'])
+            report = json.loads(report_path.read_text(encoding='utf-8'))
+            self.assertNotIn('reference_library', report)
+            self.assertEqual(report['experiment_config_sha256'], file_sha256(config_path))
             payload['method_id'] = 'gp_hrl'
             path.write_text(json.dumps(payload), encoding='utf-8')
             with self.assertRaises(ValueError):
@@ -210,9 +232,31 @@ class PureGPTests(unittest.TestCase):
                     raise RuntimeError('test failure')
             self.assertEqual(os.environ['OMP_NUM_THREADS'], '7')
         with self.assertRaises(SystemExit), patch(
-                'algorithms.comparisons.pure_gp_hrl.generate.reference_settings') as reference:
-            generate_main(['--reference-library', 'unused.json', '--deadline-cache', 'SS=cache', '--workers', '0'])
+                'algorithms.comparisons.pure_gp_hrl.generate.experiment_settings') as reference:
+            generate_main(['--scenario', 'SS', '--ddl', 'T', '--deadline-cache', 'SS=cache', '--workers', '0'])
         reference.assert_not_called()
+
+    def test_independent_config_all_nine_conditions_and_objective_override(self):
+        path = ROOT_DIR / 'algorithms/comparisons/pure_gp_hrl/experiment.yaml'
+        sizes = {'S': 'small', 'M': 'med', 'L': 'large'}
+        caches = [f'{t}{r}=data/deadlines/fcfs/exact_mix_v1/fcfs_{tn}Task_{rn}Res_exactmix_formal38.json'
+                  for t, tn in sizes.items() for r, rn in sizes.items()]
+        for scenario in ('SS', 'SM', 'SL'):
+            for ddl in ('T', 'M', 'L'):
+                context, deadline, k, mode, config = experiment_settings(path, scenario, ddl, caches)
+                self.assertEqual(context.source_scenario, scenario)
+                self.assertEqual(deadline.code, ddl)
+                self.assertEqual((k, mode), (10, 'original'))
+                self.assertEqual(config['dataset']['train_seeds'], [1, 2, 3])
+                self.assertEqual(config['admission_scope']['allowed_scenarios'], list(context.test_scenarios))
+                self.assertEqual(config['dataset']['deadline_alpha_small'], deadline.alpha_small)
+        _, _, k, mode, config = experiment_settings(path, 'SS', 'T', caches, top_k=3, objective='energy_only')
+        self.assertEqual((k, mode), (3, 'energy_only'))
+        self.assertEqual(config['llm_objective'], 'energy_only')
+        with self.assertRaisesRegex(ValueError, 'positive integer'):
+            experiment_settings(path, 'SS', 'T', caches, top_k=0)
+        with self.assertRaisesRegex(FileNotFoundError, 'deadline cache'):
+            experiment_settings(path, 'SS', 'T', ['SS=missing.json', *caches[1:]])
 
     def test_unexpected_worker_failure_stops_search(self):
         program = compile_rule(('min_exec_time',))[0]

@@ -46,7 +46,8 @@ def main(argv=None):
     path = directory / 'evaluation.json'
     write_json(path, dict(**identity(), checkpoint_manifest=str(args.checkpoint_manifest.resolve()),
                          gp_library=str(library), gp_library_sha256=file_sha256(library),
-                         reference_library=payload['reference_library'],
+                         **{key: payload[key] for key in ('experiment_config', 'experiment_config_sha256',
+                             'reference_library', 'reference_library_sha256') if key in payload},
                          experiment_protocol=context.identity(),
                          config_snapshot=manifest['config_snapshot'], **_json_value(result)))
     print(path)

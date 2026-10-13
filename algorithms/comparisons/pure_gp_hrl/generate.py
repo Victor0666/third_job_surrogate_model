@@ -14,20 +14,19 @@ from omegaconf import OmegaConf
 
 from .core import PureGPProgram as GPProgram, random_program, crossover, mutate, frozen_source, terminals_for_objective
 from algorithms.llm_safe_hrl.LLM.export_topk import _build_record, select_topk, topk_ranking_key
-from algorithms.llm_safe_hrl.LLM.protocol_config import apply_seevo_scenario_config
 from algorithms.llm_safe_hrl.LLM.problems.cews_task_constructive.eval import evaluate_candidate
 from algorithms.llm_safe_hrl.base.heuristic_admission import (
     file_sha256, record_sha256, evaluation_context_from_config, admission_scope_from_config,
 )
 from algorithms.llm_safe_hrl.base.llm_objective import (
-    validate_objective_identity, objective_identity, ENERGY_POLICY, ENERGY_RANKING_FIELDS,
+    objective_mode, objective_identity, ENERGY_POLICY, ENERGY_RANKING_FIELDS,
 )
 from algorithms.llm_safe_hrl.base.manager_heuristics import load_manager_heuristic_library
 from algorithms.llm_safe_hrl.base.topk_schema import (
     TOPK_MANIFEST_SCHEMA_VERSION, TOPK_SELECTION_MODE, TOPK_SELECTION_POLICY_VERSION,
 )
 from algorithms.llm_safe_hrl.run_context import resolve_deadline_setting
-from algorithms.llm_safe_hrl.scenario_registry import resolve_experiment_protocol
+from algorithms.llm_safe_hrl.scenario_registry import resolve_experiment_protocol, apply_scenario_to_problem_config
 from hrl_mix.train_config import ROOT_DIR, validate_single_deadline_cache_paths
 
 
@@ -66,42 +65,42 @@ def write_json(path, value):
     temporary.replace(path)
 
 
-def reference_settings(path, caches):
+def experiment_settings(path, scenario, ddl, caches, *, top_k=None, objective=None):
     path = Path(path).resolve()
-    reference = json.loads(path.read_text(encoding='utf-8'))
-    mode = validate_objective_identity(reference)
-    if reference.get('selection_mode') != TOPK_SELECTION_MODE:
-        raise ValueError('reference must be a Top-K library')
-    identity = reference['experiment_protocol']
-    context = resolve_experiment_protocol('single', source_scenario=identity['source_scenario'])
-    if context.identity() != identity:
-        raise ValueError('reference does not match the formal Single seed protocol')
-    deadline = resolve_deadline_setting(reference['deadline_setting']['ddl_code'])
-    if deadline.identity() != reference['deadline_setting']:
-        raise ValueError('reference deadline identity mismatch')
-    k = int(reference['selection_policy']['requested_k'])
-    if k < 1 or len(reference['llm_rules']) != k:
-        raise ValueError('reference must contain exactly K rules')
+    config = OmegaConf.to_container(OmegaConf.load(path), resolve=True)
+    mode = objective_mode(objective if objective is not None else config['objective_mode'])
+    k = top_k if top_k is not None else config['top_k']
+    if isinstance(k, bool) or not isinstance(k, int) or k < 1:
+        raise ValueError('top-k must be a positive integer')
+    context = resolve_experiment_protocol('single', source_scenario=scenario)
+    deadline = resolve_deadline_setting(ddl)
     caches = validate_single_deadline_cache_paths('single', caches,
                                                 source_scenario=context.source_scenario)
-    template = path.parent / 'effective_admission_config.yaml'
-    if not template.is_file():
-        raise FileNotFoundError(f'reference evaluation config not found: {template}')
-    config = OmegaConf.to_container(OmegaConf.load(template), resolve=True)
-    config = apply_seevo_scenario_config(config, context.source_scenario, caches, require_files=True)
+    config = apply_scenario_to_problem_config(config, context.source_scenario)
+    for name in config['dataset']['dax_files']:
+        if not (ROOT_DIR / 'data/dax' / name).is_file():
+            raise FileNotFoundError(f'missing scenario DAX file: {name}')
+    for cache in caches.values():
+        if not Path(cache).is_file():
+            raise FileNotFoundError(f'missing deadline cache: {cache}')
+    config['top_k'], config['objective_mode'] = k, mode
+    # The shared evaluator retains this wire key; no LLM configuration is loaded.
     config['llm_objective'] = mode
-    config['experiment_protocol'] = identity
+    config['experiment_protocol'] = context.identity()
     config['dataset'].update(train_seeds=list(context.llm_train_seeds),
                              validation_seeds=list(context.llm_validation_seeds),
-                             test_seeds=list(context.final_test_seeds))
+                             test_seeds=list(context.final_test_seeds),
+                             deadline_cache_path=caches[context.source_scenario])
     config['dataset'].update({key: value for key, value in deadline.identity().items()
                               if key.startswith('deadline_')})
-    if any(evaluation_context_from_config(config) != rule['evaluation_context']
-           for rule in reference['llm_rules']):
-        raise ValueError('current simulator inputs differ from reference evaluation context')
-    # Historical Linux paths are never used; explicit current-machine caches win.
     config['deadline_cache_paths'] = caches
-    return reference, context, deadline, k, mode, config
+    config['admission_scope'] = dict(mode='resource_task_domain',
+        resource_code=context.source_scenario[1], allowed_scenarios=list(context.test_scenarios),
+        workflow_families=evaluation_context_from_config(config)['workflow_families'])
+    admission_scope_from_config(config)
+    if mode == 'energy_only' and not config['fuzzy']['enabled']:
+        raise ValueError('energy_only requires fuzzy energy evaluation')
+    return context, deadline, k, mode, config
 
 class RuleEvaluator:
     def __init__(self, directory, config, context, search_config, episode_budget=None):
@@ -202,7 +201,7 @@ class RuleEvaluator:
             raise EvaluationBudgetExceeded()
 
 
-def export_library(directory, reference_path, reference, context, deadline, k, mode, config,
+def export_library(directory, config_path, context, deadline, k, mode, config,
                    candidates, budget, smoke=False):
     ranked = sorted(candidates, key=lambda candidate: candidate['ranking_key'])
     selected = select_topk(ranked, k, llm_objective=mode)
@@ -229,13 +228,17 @@ def export_library(directory, reference_path, reference, context, deadline, k, m
                     cmaes_enabled=False, parameter_optimization_enabled=False,
                     compatibility_source_kind='seevo_generated',
                     selection_mode=TOPK_SELECTION_MODE,
-                    selection_policy={**reference['selection_policy'], 'requested_k': k,
-                                      'selected_count': k},
+                    selection_policy=dict(policy_version=TOPK_SELECTION_POLICY_VERSION,
+                        requested_k=k, selected_count=k, unique_structure_first=True,
+                        hard_energy_threshold=None, ranking_fields=[
+                            'constraint_feasible', 'max_deadline_violation_rate_across_seeds',
+                            'max_fuzzy_lateness', 'fuzzy_total_energy_score',
+                            'objective_cv_across_seeds', 'candidate_sha256']),
                     trusted_source_root='generated', trusted_report_root='reports',
                     admission_scope=admission_scope_from_config(config),
                     experiment_protocol=context.identity(), deadline_setting=deadline.identity(),
-                    reference_library=str(Path(reference_path).resolve()),
-                    reference_library_sha256=file_sha256(reference_path),
+                    experiment_config=str(Path(config_path).resolve()),
+                    experiment_config_sha256=file_sha256(config_path),
                     search_budget=budget, llm_rules=records)
     if mode == 'energy_only':
         manifest.update(objective_identity())
@@ -255,7 +258,11 @@ def export_library(directory, reference_path, reference, context, deadline, k, m
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--reference-library', type=Path, required=True)
+    parser.add_argument('--config', type=Path, default=Path(__file__).with_name('experiment.yaml'))
+    parser.add_argument('--scenario', required=True)
+    parser.add_argument('--ddl', choices=('T', 'M', 'L'), required=True)
+    parser.add_argument('--top-k', type=int)
+    parser.add_argument('--objective', choices=('original', 'energy_only'))
     parser.add_argument('--deadline-cache', action='append', required=True)
     parser.add_argument('--algorithm-seed', type=int, default=0)
     parser.add_argument('--workers', type=int, default=1,
@@ -275,20 +282,23 @@ def main(argv=None):
         parser.error('episode-budget must be positive')
     if args.algorithm_seed < 0:
         parser.error('algorithm-seed must be non-negative')
-    reference, context, deadline, k, mode, config = reference_settings(
-        args.reference_library, args.deadline_cache)
+    context, deadline, k, mode, config = experiment_settings(
+        args.config, args.scenario, args.ddl, args.deadline_cache,
+        top_k=args.top_k, objective=args.objective)
     if args.smoke:
         args.population_size, args.generations, k = 4, 2, 1
+        config['top_k'] = k
         config['dataset']['workflows_per_instance'] = config['problem_size'] = 2
     elif args.population_size < k:
-        parser.error('population-size must be at least reference K')
+        parser.error('population-size must be at least top-k')
     directory = (args.output_dir or ROOT_DIR / 'out/ablations/pure_gp_hrl/rules'
                  / context.source_scenario / deadline.code
                  / f"{datetime.now():%Y%m%d_%H%M%S_%f}_a{args.algorithm_seed}").resolve()
     directory.mkdir(parents=True, exist_ok=False)
     for name in ('generated', 'reports'):
         (directory / name).mkdir()
-    OmegaConf.save(OmegaConf.create(config), directory / 'effective_admission_config.yaml')
+    config_path = directory / 'effective_experiment_config.yaml'
+    OmegaConf.save(OmegaConf.create(config), config_path)
     search_config = dict(method='pure_gp', algorithm_seed=args.algorithm_seed,
                          population_size=args.population_size, generations=args.generations,
                          max_depth=args.max_depth, constant_range=[-4., 4.],
@@ -354,7 +364,7 @@ def main(argv=None):
                   search_config=search_config, cmaes_enabled=False,
                   parameter_optimization_enabled=False, surrogate_enabled=False,
                   counterfactual_feedback_enabled=False, critical_state_replay_enabled=False)
-    path = export_library(directory, args.reference_library, reference, context, deadline, k,
+    path = export_library(directory, config_path, context, deadline, k,
                           mode, config, list(archive.values()), budget, smoke=args.smoke)
     print(path)
     return path

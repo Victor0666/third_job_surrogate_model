@@ -1,0 +1,30 @@
+# Independent pure-GP simulation settings. Scenario/DDL come from the CLI;
+# DAX files, resources and seed splits come from the shared scenario registry.
+top_k: 10
+objective_mode: original
+problem_size: 50
+objective:
+  metric: total_energy
+constraints:
+  deadline_violation_rate_max: 0.0
+  comparison: feasibility_first
+fuzzy:
+  enabled: true
+  delta1: 0.75
+  delta2: 1.2
+  energy_uncertainty_weight: 1.0
+  deadline_eta: 0.95
+  use_fuzzy_deadline_constraint: true
+  resource_seed_mode: episode_seed
+  resource_seed_offset: 0
+normalization:
+  energy_scale: 0.001
+  lateness_scale: 300.0
+dataset:
+  workflows_per_instance: 50
+  arrival_lambda: 0.03
+  horizon: 1000000000.0
+  deadline_mode: cache_fcfs
+safety:
+  max_decisions: 1000000
+  max_stalled_steps: 10

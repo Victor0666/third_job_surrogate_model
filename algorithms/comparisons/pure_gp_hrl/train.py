@@ -55,8 +55,8 @@ def build_gp_config(**kwargs):
                dict(**identity(), rule_count=len(payload['llm_rules']),
                     gp_library=str(Path(kwargs['manager_heuristic_manifest']).resolve()),
                     gp_library_sha256=file_sha256(kwargs['manager_heuristic_manifest']),
-                    reference_library=payload['reference_library'],
-                    reference_library_sha256=payload['reference_library_sha256']))
+                    **{key: payload[key] for key in ('experiment_config', 'experiment_config_sha256',
+                        'reference_library', 'reference_library_sha256') if key in payload}))
     return cfg
 
 

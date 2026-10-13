@@ -36,22 +36,20 @@
   不足 K 个结构时可选同结构的不同常数个体，仍须具有不同冻结源码。
   不足 K 个有效个体时失败，不复制规则凑数。没有额外的行为多样性清除。
 
-## 与参考库对齐
+## 独立实验配置
 
-已提供的参考库：
-
-```text
-out/main_single/SL/L/20260919_120714_908169_p3865/topk_heuristic_library_k10.json
-```
-
-从它及同目录 `effective_admission_config.yaml` 读取：Single、SL、Loose、K=10、
-original 可行性优先目标、工作流数、资源和模糊评价设置。显式 cache 参数替换历史
-Linux 路径，并核对当前场景注册表与参考 evaluation context 一致。
-本版不读取 `.hydra/config.yaml` 中的 CMA 设置，也不初始化或调用 CMA optimizer。
+生成入口不再接受 `--reference-library`，不读取 LLM 规则库或历史 LLM 配置。
+默认读取本目录受 Git 管理的 `experiment.yaml`：K=10、original 可行性优先目标、
+50 工作流、到达率 0.03 及模糊评价参数。用 `--config <YAML>` 可以指定独立配置；
+`--top-k N`、`--objective original|energy_only` 覆盖其中的规则数和目标。
+场景和 DDL 必须通过 `--scenario SS|SM|SL|... --ddl T|M|L` 指定；DAX、资源拓扑、
+训练/验证/测试 seed 划分复用共享注册表，deadline cache 由显式命令参数提供。
+运行时保存 `effective_experiment_config.yaml`，其路径和哈希写入规则库、训练记录
+及最终报告。GP 只从终端集、常数和算子随机生成种群，不需要任何 LLM 实验产物。
 
 规则训练 seeds 是 1..3。4/5 仍为协议保留的规则验证 seeds，但本版没有参数 confirm，
 因此生成流程不消耗这两个 seeds，`validation_episode_count=0`；不声称已做验证选择。
-Top-K 与参考库一样按训练评价选择。HRL 使用训练 1..5、验证 101/102/103，
+Top-K 按训练评价选择。HRL 使用训练 1..5、验证 101/102/103，
 最终测试 201..230，在 SL/ML/LL 三个任务规模下冻结评测。
 
 没有代理模型、反事实反馈、关键状态回放、CMA 诊断或额外的安全/能耗准入门槛。
@@ -80,7 +78,6 @@ CPU 候选评价进程。并行进程使用 spawn 启动，每个进程的数值
 ## SL-L 正式命令（PowerShell，仓库根目录）
 
 ```powershell
-$ReferenceLibrary = 'out/main_single/SL/L/20260919_120714_908169_p3865/topk_heuristic_library_k10.json'
 $PureRuleDir = 'out/ablations/pure_gp_hrl/rules/SL/L/pure_a0'
 $PureLibrary = "$PureRuleDir/topk_heuristic_library_k10.json"
 $CacheArgs = @(
@@ -91,7 +88,7 @@ $CacheArgs = @(
 
 # 1. 纯 GP 生成 Top-10；拒绝覆盖已有 output-dir。
 python -m algorithms.comparisons.pure_gp_hrl.generate `
-  --reference-library $ReferenceLibrary --output-dir $PureRuleDir `
+  --scenario SL --ddl L --top-k 10 --objective original --output-dir $PureRuleDir `
   --algorithm-seed 0 --workers 15 --population-size 50 --generations 10 --max-depth 8 @CacheArgs
 
 # 2. 原三层从头训练。以下是纯在线示例，安全参数须与 Full 训练命令一致。
@@ -110,7 +107,8 @@ python -m algorithms.comparisons.pure_gp_hrl.evaluate `
 `--algorithm-seed` 控制 GP 结构与常数；训练入口的 `--optimizer-seed` 是原 RL 的网络/
 训练随机种子，这个参数名不表示使用了 CMA-ES。训练入口支持原离线预训练 manifest、
 pipeline plan/resume 及 curriculum，需使用纯 GP 规则 ID 对应的独立演示并与 Full 对齐。
-参考规则库不能说明 Full 实际采用的 reward scale、lambda、预训练步数或 curriculum。
+Full 和 GP 的目标、K、仿真预算、reward scale、lambda、预训练步数与 curriculum
+必须显式对齐；独立配置不会自动继承 Full 的训练命令。
 
 ## 兼容标记及输出
 
@@ -126,14 +124,15 @@ optimization metadata 字段；这些仅为接口兼容。元数据中的 best_p
 - 网络：`checkpoints/ablations/pure_gp_hrl/<source>/<ddl_name>/<run>/`。
 - 测试：`out/ablations/pure_gp_hrl/test/<source>/<DDL>/<run_timestamp>/`。
 
-纯 GP 入口拒绝 GP+CMA/Full 规则库与 checkpoint。小规模规则标记 smoke_only，不能
+训练和评测入口拒绝 GP+CMA/Full 规则库与 checkpoint；历史纯 GP 规则库仍可加载。
+小规模规则标记 smoke_only，不能
 交给正式训练/评测入口。未提供进化阶段 resume，不改写旧实验或 deadline cache。
 
 ## 检查
 
 ```powershell
 # 4个体、2代、每实例2工作流、Top-1，仅用于生成/加载冒烟检查。
-python -m algorithms.comparisons.pure_gp_hrl.generate --reference-library $ReferenceLibrary --smoke @CacheArgs
+python -m algorithms.comparisons.pure_gp_hrl.generate --scenario SL --ddl L --workers 2 --smoke @CacheArgs
 
 python -m unittest tests.test_pure_gp_hrl tests.test_gp_hrl_ablation tests.test_topk_heuristic_selection -q
 ```
