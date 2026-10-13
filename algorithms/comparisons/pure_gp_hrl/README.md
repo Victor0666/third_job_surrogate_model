@@ -61,8 +61,21 @@ Top-K 与参考库一样按训练评价选择。HRL 使用训练 1..5、验证 1
 搜索规模才能比较同样的实际预算。
 
 每个候选没有额外参数试验，成功评价通常消耗 3 个 episode。预算统计包含失败批次
-的预留尝试数，成功训练数单独报告；缓存命中不计真实仿真。预算耗尽后仅从已完整
-评价的档案导出，不足 K 则失败。当前串行运行，缓存仅在本次运行内有效。
+的预留尝试数，成功训练数单独报告；缓存命中不计真实仿真。预算耗尽后先收回已派发
+候选的结果，再从已完整评价的档案导出；不足 K 则失败。缓存仅在本次运行内有效。
+
+## CPU 并行评价
+
+生成命令支持 `--workers N`，默认 1（串行）；例如 `--workers 15` 使用最多 15 个
+CPU 候选评价进程。并行进程使用 spawn 启动，每个进程的数值库线程限制为 1；每个
+候选内部的训练 seeds 仍串行评价，不需要 GPU。进化、随机采样、缓存和预算由主进程
+管理，按原候选顺序收集结果；重复候选不重复成功仿真，失败候选仍按原顺序重试。
+进程数不写入规则源码的搜索配置哈希，改变并行度不改变规则和 Top-K 的排序逻辑。
+实际进程数记录在导出库的 `search_budget.evaluation_workers`。
+
+32 核服务器可先用单组 `--workers 15`；九组同时运行建议从每组 3 个进程起步。
+并行度应根据可用 CPU 和内存调整，超过待评价候选数不会增加有效并行度。
+`train --validation-workers` 仅控制 HRL 验证，不控制 GP 搜索；尚不支持进化断点恢复。
 
 ## SL-L 正式命令（PowerShell，仓库根目录）
 
@@ -79,7 +92,7 @@ $CacheArgs = @(
 # 1. 纯 GP 生成 Top-10；拒绝覆盖已有 output-dir。
 python -m algorithms.comparisons.pure_gp_hrl.generate `
   --reference-library $ReferenceLibrary --output-dir $PureRuleDir `
-  --algorithm-seed 0 --population-size 50 --generations 10 --max-depth 8 @CacheArgs
+  --algorithm-seed 0 --workers 15 --population-size 50 --generations 10 --max-depth 8 @CacheArgs
 
 # 2. 原三层从头训练。以下是纯在线示例，安全参数须与 Full 训练命令一致。
 python -m algorithms.comparisons.pure_gp_hrl.train `
@@ -128,6 +141,7 @@ python -m unittest tests.test_pure_gp_hrl tests.test_gp_hrl_ablation tests.test_
 已检查随机常数与标量/批量分数一致、空/单任务输入、固定种子的可复现性、深度上限、
 非法常数与 energy_only 限制、仿真预算、测试 seed 隔离、Top-K 排序和生产 loader。
 测试显式将 CMA optimize 调用设为报错，纯 GP 直接评价仍通过。
+并行测试覆盖候选顺序、重复候选、失败重试、预算耗尽时的结果回收和线程环境恢复。
 小规模实际运行已完成规则生成、原三层训练、best checkpoint 保存和 SL 冻结推理，
 并比较三个 Agent 的推理前后指纹。没有运行正式 K=10/600轮实验。
 缩小工作流数会改变 M/L 精确类别配额，不能拿 2 工作流直接匹配正式 50 工作流 cache。

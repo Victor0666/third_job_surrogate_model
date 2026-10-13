@@ -1,7 +1,12 @@
 """Evolve pure GP Top-K rules using direct simulation, without parameter optimization."""
 import argparse
+from collections import deque
+from concurrent.futures import ProcessPoolExecutor
+from contextlib import contextmanager
 from datetime import datetime
 import json
+import multiprocessing
+import os
 from pathlib import Path
 
 import numpy as np
@@ -28,6 +33,29 @@ from hrl_mix.train_config import ROOT_DIR, validate_single_deadline_cache_paths
 
 class EvaluationBudgetExceeded(RuntimeError):
     """Stop offline evolution when the requested simulation budget ends."""
+
+
+@contextmanager
+def evaluation_pool(workers):
+    if workers < 1:
+        raise ValueError('workers must be positive')
+    if workers == 1:
+        yield None
+        return
+    names = ('OMP_NUM_THREADS', 'MKL_NUM_THREADS', 'OPENBLAS_NUM_THREADS', 'NUMEXPR_NUM_THREADS')
+    previous = {name: os.environ.get(name) for name in names}
+    try:
+        for name in names:
+            os.environ[name] = '1'
+        with ProcessPoolExecutor(max_workers=workers,
+                                 mp_context=multiprocessing.get_context('spawn')) as executor:
+            yield executor
+    finally:
+        for name, value in previous.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
 
 
 def write_json(path, value):
@@ -83,7 +111,7 @@ class RuleEvaluator:
                            attempted_episode_count=0, cache_hits=0)
         self.cache = {}
 
-    def exact(self, path, seeds):
+    def reserve(self, path, seeds):
         seeds = tuple(int(seed) for seed in seeds)
         if not seeds or set(seeds) & set(self.context.final_test_seeds):
             raise ValueError('offline search may not consume final-test seeds')
@@ -92,25 +120,86 @@ class RuleEvaluator:
         key = (file_sha256(path), seeds)
         if key in self.cache:
             self.counts['cache_hits'] += 1
-            return dict(self.cache[key])
+            return key, dict(self.cache[key])
         if (self.episode_budget is not None and
                 self.counts['attempted_episode_count'] + len(seeds) > self.episode_budget):
             raise EvaluationBudgetExceeded()
         self.counts['attempted_episode_count'] += len(seeds)
-        metrics = evaluate_candidate(path, self.config, seeds)
+        return key, None
+
+    def complete(self, key, metrics):
+        seeds = key[1]
         self.counts['training_episode_count'] += len(set(seeds) & set(self.context.llm_train_seeds))
         self.counts['validation_episode_count'] += len(set(seeds) & set(self.context.llm_validation_seeds))
         self.cache[key] = dict(metrics)
         return metrics
 
-    def prepare(self, program, generation, individual):
+    def exact(self, path, seeds):
+        key, metrics = self.reserve(path, seeds)
+        if metrics is None:
+            metrics = self.complete(key, evaluate_candidate(path, self.config, key[1]))
+        return metrics
+
+    def source_record(self, program, generation, individual):
         source = frozen_source(program, self.config['llm_objective'], self.search_config, self.context)
         path = self.directory / 'generated' / f'gp_g{generation}_i{individual}.py'
         path.write_text(source, encoding='utf-8')
-        metrics = self.exact(path, self.context.llm_train_seeds)
-        return dict(metrics=metrics, source_path=path, source_hash=file_sha256(path),
+        return dict(source_path=path, source_hash=file_sha256(path),
                     iteration=generation, individual=individual,
-                    ranking_key=topk_ranking_key(metrics), program=program.to_dict())
+                    program=program.to_dict())
+
+    def prepare(self, program, generation, individual):
+        record = self.source_record(program, generation, individual)
+        metrics = self.exact(record['source_path'], self.context.llm_train_seeds)
+        return dict(record, metrics=metrics, ranking_key=topk_ranking_key(metrics))
+
+    def population(self, programs, generation, archive, executor=None, workers=1):
+        pending, tokens = deque(), set()
+        index, exhausted = 0, False
+        while index < len(programs) or pending:
+            while not exhausted and index < len(programs) and len(pending) < workers:
+                program = programs[index]
+                # Wait for an earlier identical candidate before deciding whether to reuse or retry it.
+                if program.tokens in tokens:
+                    break
+                record, key, future = None, None, None
+                try:
+                    if program.tokens in archive:
+                        record = archive[program.tokens]
+                    elif executor is None:
+                        record = self.prepare(program, generation, index)
+                    else:
+                        record = self.source_record(program, generation, index)
+                        key, metrics = self.reserve(record['source_path'], self.context.llm_train_seeds)
+                        if metrics is None:
+                            future = executor.submit(evaluate_candidate, record['source_path'], self.config, key[1])
+                        else:
+                            record.update(metrics=metrics, ranking_key=topk_ranking_key(metrics))
+                except EvaluationBudgetExceeded:
+                    exhausted = True
+                    break
+                except (ValueError, FloatingPointError, OverflowError) as exc:
+                    record = exc
+                pending.append((index, program, record, key, future))
+                tokens.add(program.tokens)
+                index += 1
+            if not pending:
+                if exhausted:
+                    raise EvaluationBudgetExceeded()
+                break
+            individual, program, record, key, future = pending.popleft()
+            tokens.remove(program.tokens)
+            if future is not None:
+                try:
+                    metrics = self.complete(key, future.result())
+                    record.update(metrics=metrics, ranking_key=topk_ranking_key(metrics))
+                except (ValueError, FloatingPointError, OverflowError) as exc:
+                    record = exc
+            if not isinstance(record, Exception):
+                archive[program.tokens] = record
+            yield individual, program, record
+        if exhausted:
+            raise EvaluationBudgetExceeded()
 
 
 def export_library(directory, reference_path, reference, context, deadline, k, mode, config,
@@ -169,6 +258,8 @@ def main(argv=None):
     parser.add_argument('--reference-library', type=Path, required=True)
     parser.add_argument('--deadline-cache', action='append', required=True)
     parser.add_argument('--algorithm-seed', type=int, default=0)
+    parser.add_argument('--workers', type=int, default=1,
+                        help='CPU candidate evaluation processes; each worker uses one numeric-library thread')
     parser.add_argument('--population-size', type=int, default=50)
     parser.add_argument('--generations', type=int, default=10)
     parser.add_argument('--max-depth', type=int, default=8)
@@ -176,6 +267,8 @@ def main(argv=None):
     parser.add_argument('--output-dir', type=Path)
     parser.add_argument('--smoke', action='store_true')
     args = parser.parse_args(argv)
+    if args.workers < 1:
+        parser.error('workers must be positive')
     if min(args.population_size, args.generations, args.max_depth) < 1 or args.population_size < 2:
         parser.error('population-size >= 2, generations/max-depth >= 1 required')
     if args.episode_budget is not None and args.episode_budget < 1:
@@ -211,42 +304,40 @@ def main(argv=None):
     archive, failures, history = {}, [], []
     status = 'COMPLETED'
     try:
-        for generation in range(args.generations):
-            scored = []
-            for individual, program in enumerate(population):
-                if program.tokens not in archive:
-                    try:
-                        record = evaluator.prepare(program, generation, individual)
-                        archive[program.tokens] = record
-                    except (ValueError, FloatingPointError, OverflowError) as exc:
+        with evaluation_pool(args.workers) as executor:
+            for generation in range(args.generations):
+                scored = []
+                for individual, program, record in evaluator.population(
+                        population, generation, archive, executor, args.workers):
+                    if isinstance(record, Exception):
                         failures.append(dict(generation=generation, individual=individual,
-                                             error=f'{type(exc).__name__}: {exc}'))
+                                             error=f'{type(record).__name__}: {record}'))
                         continue
-                scored.append(archive[program.tokens])
-            if not scored:
-                raise RuntimeError('no valid GP individuals; inspect search_history.json')
-            scored.sort(key=lambda row: row['ranking_key'])
-            history.append(dict(generation=generation, best_key=scored[0]['ranking_key'],
-                                unique_rules=len(archive), **evaluator.counts))
-            write_json(directory / 'search_history.json', dict(history=history, failures=failures))
-            print(f"generation={generation} valid={len(scored)} unique={len(archive)} "
-                  f"episodes={evaluator.counts['attempted_episode_count']} "
-                  f"best={scored[0]['ranking_key']}", flush=True)
-            if generation + 1 == args.generations:
-                break
+                    scored.append(record)
+                if not scored:
+                    raise RuntimeError('no valid GP individuals; inspect search_history.json')
+                scored.sort(key=lambda row: row['ranking_key'])
+                history.append(dict(generation=generation, best_key=scored[0]['ranking_key'],
+                                    unique_rules=len(archive), **evaluator.counts))
+                write_json(directory / 'search_history.json', dict(history=history, failures=failures))
+                print(f"generation={generation} valid={len(scored)} unique={len(archive)} "
+                      f"episodes={evaluator.counts['attempted_episode_count']} "
+                      f"best={scored[0]['ranking_key']}", flush=True)
+                if generation + 1 == args.generations:
+                    break
 
-            def tournament():
-                indices = rng.integers(len(scored), size=3)
-                winner = min((scored[index] for index in indices), key=lambda row: row['ranking_key'])
-                return GPProgram.from_dict(winner['program'])
+                def tournament():
+                    indices = rng.integers(len(scored), size=3)
+                    winner = min((scored[index] for index in indices), key=lambda row: row['ranking_key'])
+                    return GPProgram.from_dict(winner['program'])
 
-            population = [GPProgram.from_dict(scored[0]['program'])]
-            while len(population) < args.population_size:
-                parent = tournament()
-                draw = rng.random()
-                child = (crossover(parent, tournament(), rng, args.max_depth)[0] if draw < .8 else
-                         mutate(parent, rng, args.max_depth) if draw < .95 else parent)
-                population.append(child)
+                population = [GPProgram.from_dict(scored[0]['program'])]
+                while len(population) < args.population_size:
+                    parent = tournament()
+                    draw = rng.random()
+                    child = (crossover(parent, tournament(), rng, args.max_depth)[0] if draw < .8 else
+                             mutate(parent, rng, args.max_depth) if draw < .95 else parent)
+                    population.append(child)
     except EvaluationBudgetExceeded:
         status = 'EPISODE_BUDGET_REACHED'
     except Exception:
@@ -259,7 +350,7 @@ def main(argv=None):
                   population_size=args.population_size, generations=args.generations,
                   completed_generations=len(history), max_depth=args.max_depth,
                   algorithm_seed=args.algorithm_seed, status=status,
-                  evaluation_workers=1, cache_scope='per_run_in_memory',
+                  evaluation_workers=args.workers, threads_per_worker=1, cache_scope='per_run_in_memory',
                   search_config=search_config, cmaes_enabled=False,
                   parameter_optimization_enabled=False, surrogate_enabled=False,
                   counterfactual_feedback_enabled=False, critical_state_replay_enabled=False)

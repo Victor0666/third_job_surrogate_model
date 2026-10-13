@@ -1,5 +1,7 @@
 """Pure GP constants, direct evaluation and production Top-K compatibility."""
 import json
+from concurrent.futures import ThreadPoolExecutor
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -10,7 +12,9 @@ import numpy as np
 from algorithms.comparisons.pure_gp_hrl.core import (
     PureGPProgram, random_program, crossover, mutate, frozen_source, terminals_for_objective,
 )
-from algorithms.comparisons.pure_gp_hrl.generate import RuleEvaluator, export_library, EvaluationBudgetExceeded
+from algorithms.comparisons.pure_gp_hrl.generate import (
+    RuleEvaluator, export_library, EvaluationBudgetExceeded, evaluation_pool, main as generate_main,
+)
 from algorithms.comparisons.pure_gp_hrl.train import validate_gp_library, main as train_main, build_gp_config
 from algorithms.comparisons.drlea_nichgp.gp_primitives import program_depth
 from algorithms.llm_safe_hrl.LLM.rule_optimization import CMAESOptimizer, extract_rule_metadata
@@ -158,6 +162,71 @@ class PureGPTests(unittest.TestCase):
             path.write_text(json.dumps(payload), encoding='utf-8')
             with self.assertRaises(ValueError):
                 validate_gp_library(path)
+
+    def test_parallel_order_duplicates_failures_and_budget_match_serial(self):
+        programs = [compile_rule(tokens)[0] for tokens in (
+            ('mul', .5, 'min_exec_time'), ('mul', .7, 'min_exec_time'),
+            ('min_comm_time',), ('mul', .5, 'min_exec_time'),
+            ('mul', .7, 'min_exec_time'), ('upward_rank',))]
+
+        def fake_evaluate(path, config, seeds):
+            metadata = extract_rule_metadata(Path(path).read_text(encoding='utf-8'))
+            if .7 in metadata['best_parameters'].values():
+                raise ValueError('invalid candidate')
+            return _metrics(Path(path), metadata)
+
+        with tempfile.TemporaryDirectory(dir=ROOT_DIR) as raw:
+            directory = Path(raw)
+            (directory / 'generated').mkdir()
+            for budget in (None, 0, 6, 12):
+                outputs = []
+                for workers in (1, 3):
+                    evaluator = RuleEvaluator(directory, {'llm_objective': 'original'}, CONTEXT, SEARCH, budget)
+                    archive, records, exhausted = {}, [], False
+                    # Threads let the fake evaluator force the same worker errors as real processes.
+                    with ThreadPoolExecutor(max_workers=workers) as pool, \
+                         patch('algorithms.comparisons.pure_gp_hrl.generate.evaluate_candidate',
+                               side_effect=fake_evaluate) as evaluate:
+                        try:
+                            for index, program, record in evaluator.population(
+                                    programs, 0, archive, None if workers == 1 else pool, workers):
+                                records.append((index, program.tokens, str(record) if isinstance(record, Exception) else record))
+                        except EvaluationBudgetExceeded:
+                            exhausted = True
+                        calls = evaluate.call_count
+                    outputs.append((records, archive, evaluator.counts, calls, exhausted))
+                self.assertEqual(outputs[0], outputs[1])
+                if budget is None:
+                    self.assertEqual(outputs[0][3], 5)
+                    self.assertEqual(outputs[0][2]['training_episode_count'], 9)
+                    self.assertEqual(outputs[0][2]['attempted_episode_count'], 15)
+
+    def test_pool_restores_environment_and_cli_rejects_zero_workers(self):
+        with patch.dict(os.environ, {'OMP_NUM_THREADS': '7'}):
+            with self.assertRaisesRegex(RuntimeError, 'test failure'):
+                with evaluation_pool(2) as pool:
+                    self.assertIsNotNone(pool)
+                    self.assertEqual(os.environ['OMP_NUM_THREADS'], '1')
+                    raise RuntimeError('test failure')
+            self.assertEqual(os.environ['OMP_NUM_THREADS'], '7')
+        with self.assertRaises(SystemExit), patch(
+                'algorithms.comparisons.pure_gp_hrl.generate.reference_settings') as reference:
+            generate_main(['--reference-library', 'unused.json', '--deadline-cache', 'SS=cache', '--workers', '0'])
+        reference.assert_not_called()
+
+    def test_unexpected_worker_failure_stops_search(self):
+        program = compile_rule(('min_exec_time',))[0]
+        with tempfile.TemporaryDirectory(dir=ROOT_DIR) as raw:
+            directory = Path(raw)
+            (directory / 'generated').mkdir()
+            evaluator = RuleEvaluator(directory, {'llm_objective': 'original'}, CONTEXT, SEARCH)
+            with ThreadPoolExecutor(max_workers=2) as pool, \
+                 patch('algorithms.comparisons.pure_gp_hrl.generate.evaluate_candidate',
+                       side_effect=RuntimeError('simulator failed')):
+                with self.assertRaisesRegex(RuntimeError, 'simulator failed'):
+                    list(evaluator.population([program], 0, {}, pool, 2))
+            self.assertEqual(evaluator.counts['attempted_episode_count'], 3)
+            self.assertEqual(evaluator.counts['training_episode_count'], 0)
 
     def test_training_keeps_original_three_agents_and_independent_namespace(self):
         with patch('algorithms.comparisons.pure_gp_hrl.train.validate_gp_library',
