@@ -1,5 +1,7 @@
 # DTECN-LLM：MADDPG 引导的在线上下文资源决策
 
+当前批量在线实现及使用命令见 [批量调度说明](../../../docs/DTECN_BATCH.md)。MADDPG 训练继续使用下文原入口；批量案例收集和在线评测使用 `tools.run_dtecn_llm_batch`，结果独立保存在教师目录的 `batch_v1/`。下文原 `run validate/evaluate` 是保留的历史逐任务模式，不能代替批量评测。
+
 对应 Wu et al., *Large Language Model-Based Task Offloading and Resource
 Allocation for Digital Twin Edge Computing Networks*, TMC 2026,
 DOI `10.1109/TMC.2026.3664866`。上游：

@@ -36,7 +36,7 @@ def evaluate_with_csv(protocol, policy, split, trace_path=None):
         return _evaluate(protocol, policy, split, trace_path)
     csv_path = trace_path.with_suffix(".csv")
     fields = ("scenario", "seed", "decision_index", "decision_time", "task_id",
-              "workflow_slot", "executed_vm_id", "action_source", "action", "state")
+              "workflow_slot", "executed_vm_id", "action_source", "batch_id", "batch_size", "action", "state")
     original_assign = policy.assign
     counters = {}
     # Exclusive creation preserves partial runs, just like the original trace guard.
@@ -56,6 +56,7 @@ def evaluate_with_csv(protocol, policy, split, trace_path=None):
                 decision_time=decision_time, task_id=task_id,
                 workflow_slot=pending["owner"], executed_vm_id=result.vm_id,
                 action_source=pending["source"],
+                batch_id=pending.get("batch_id"), batch_size=pending.get("batch_size"),
                 action=json.dumps(pending["preferences"].tolist(), allow_nan=False),
                 state=json.dumps(pending["state"], ensure_ascii=False, allow_nan=False),
             ))
