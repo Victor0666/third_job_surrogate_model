@@ -63,3 +63,23 @@ Single 泛化评测使用 `--single-source SS`，并提供 SS、MS、LS 三个
 ```powershell
 python -m pytest tests/test_fixed_heuristics.py tests/test_fcfs_variants.py tests/test_experiment_matrix.py -q
 ```
+
+## 按论文对比汇总表的列格式导出
+
+`tools/export_heuristic_summary.py` 以参考 `all_summary.xlsx` 的 78 列为固定列序，
+直接读取 JSON 的 aggregate，不重新平均违反率或最坏拖期。
+每算法必须有全部九场景 × T/M/L 的 27 份结果，每份必须有 201-230 的 30 个种子。
+不允许混合不同通信模型版本；全部检查通过后才输出 CSV。
+
+```bash
+python tools/export_heuristic_summary.py
+# 只整理一个算法：
+python tools/export_heuristic_summary.py --methods fcfs_fixed
+```
+
+输出为 `out/comparisons/heuristics_formatted/<method_id>/all_summary.csv`（每算法27行），
+及 `out/comparisons/heuristics_formatted/all_summary.csv`（全部所选算法合并）。
+后续只导出单个算法时，可用 `--output-dir out/comparisons/fcfs_fixed/formatted`
+避免覆盖四算法总表。CSV 可直接用 Excel 打开，保留原始数值精度；
+没有训练的启发式，其 checkpoint、optimizer_seed 和训练收敛列留空。
+source_scenario/protocol 保留原 JSON 的真实语义，不伪装为训练过的 Single 策略。
